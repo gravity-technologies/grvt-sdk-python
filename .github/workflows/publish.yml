@@ -1,0 +1,68 @@
+name: Publish Python SDK
+
+on:
+  pull_request:
+  push:
+    tags:
+      - v*
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: false
+      - name: Check release version
+        if: github.ref_type == 'tag'
+        run: |
+          uv run --no-project python - <<'PY'
+          import os
+          import tomllib
+          from pathlib import Path
+
+          version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+          tag = os.environ["GITHUB_REF_NAME"]
+          if tag != f"v{version}":
+              raise SystemExit(f"Tag {tag} does not match package version {version}")
+          PY
+      - run: uv run --locked pytest
+      - run: uv build
+      - run: uv run --locked twine check --strict dist/*
+      - name: Test both distributions in fresh environments
+        run: |
+          for artifact in dist/*.whl dist/*.tar.gz; do
+            artifact="$(realpath "$artifact")"
+            smoke_dir="$(mktemp -d)"
+            uv venv --python 3.11 "$smoke_dir/venv"
+            uv pip install --python "$smoke_dir/venv/bin/python" "$artifact"
+            (
+              cd "$smoke_dir"
+              "$smoke_dir/venv/bin/python" -I -c 'from grvt import AsyncGrvt, Grvt'
+            )
+          done
+      - uses: actions/upload-artifact@v6
+        with:
+          name: distributions
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: distributions
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
