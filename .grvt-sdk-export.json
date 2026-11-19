@@ -1,6 +1,7 @@
 [
   ".python-version",
   "CHANGELOG.md",
+  "CONTRIBUTING.md",
   "LICENSE",
   "README.md",
   "RUNTIME_API.md",

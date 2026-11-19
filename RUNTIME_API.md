@@ -124,7 +124,7 @@ error. A generic encoder exists only as the test reference (`tests/eip712_refere
 `StructType` is internal (not exported from `grvt`) and always takes the generated `hasher`: the SDK signs only
 Grvt's own messages. `Runtime.sign` signs with a `PrivateKeySigner` directly from the generated digest. Any other
 `Signer` gets the typed data through `sign_typed`, and its signature is checked against the generated digest
-before anything is sent (the rules and the KMS high-s note are in [README.md](README.md#quickstart)).
+before anything is sent (the rules and the KMS high-s note are in [Use a wallet or KMS signer](https://developers.grvt.io/sdks/python#use-a-wallet-or-kms-signer)).
 
 The sign function works on the request as JSON data (`d = codec.to_builtins(req)`), so contract
 paths apply directly:
