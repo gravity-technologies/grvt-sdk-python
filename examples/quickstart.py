@@ -6,6 +6,7 @@ import os
 import secrets
 import sys
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
+from typing import Any
 from urllib.parse import urlparse
 
 from grvt import AsyncGrvt, Environment, OrderStateUnknown, PrivateKeySigner, enums, models, resolve_order
@@ -43,7 +44,7 @@ async def main():
             326,
         )
         encoding = "full"  # the local fixture gateway speaks full names only
-    credentials = {}
+    credentials: dict[str, Any] = {}
     account = ""
     if args.trade:
         names = ("GRVT_API_KEY", "GRVT_PRIVATE_KEY", "GRVT_SUB_ACCOUNT_ID")
@@ -80,7 +81,7 @@ async def main():
             time_in_force=enums.TimeInForce.GOOD_TILL_TIME,
             post_only=True,
             legs=[models.OrderLeg(instrument=args.instrument, size=size, limit_price=price, is_buying_asset=True)],
-            metadata=models.OrderMetadata(client_order_id=order_id),
+            metadata=models.OrderMetadataInput(client_order_id=order_id),
         )
         try:
             await client.create_order(order=order)

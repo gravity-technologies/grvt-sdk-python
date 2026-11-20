@@ -8,7 +8,8 @@ import pytest
 from conftest import instrument_payload
 
 from grvt import AsyncGrvt, CallOptions, Grvt
-from grvt._runtime import Runtime
+from grvt import models as m
+from grvt._runtime import Runtime, codec, lite
 from grvt._runtime.options import ClientOptions
 from grvt._runtime.transport import AiohttpTransport
 
@@ -39,9 +40,13 @@ def test_sync_call_options_reach_async_transport():
 
 
 async def test_ws_call_options_reach_socket(gateway):
-    async with AsyncGrvt(gateway.env, encoding="full", api_key="test-key", order_transport="ws") as client:
+    async with AsyncGrvt(gateway.env, **gateway.client_options, api_key="test-key", order_transport="ws") as client:
         socket = client.rt.socket("td")
-        socket.request = AsyncMock(return_value=b'{"result":{"ack":true}}')
+        # The mock stands in for the socket, so its reply is in the gateway's encoding.
+        reply = {"result": {"ack": True}}
+        socket.request = AsyncMock(
+            return_value=lite.encode(m.AckResponse, reply) if gateway.lite else codec.encode(reply)
+        )
         await client.cancel_order(sub_account_id=1, client_order_id=2, options=CallOptions(timeout=0.25))
         assert socket.request.call_args.kwargs["deadline"].expires > 0
         assert socket.request.call_args.kwargs["write"] is True

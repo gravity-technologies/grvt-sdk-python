@@ -6,7 +6,6 @@ The format is described in sdk/scenarios/README.md.
 from __future__ import annotations
 
 import asyncio
-import re
 from decimal import Decimal
 from typing import Any
 
@@ -29,34 +28,22 @@ from grvt import (
     refresh_cancel_countdown,
 )
 from grvt import models as m
-from grvt._runtime import ApiError, DecodeError, EventKind, OrderStateUnknown, RateLimitError, TransportError
+from grvt._runtime import (
+    ApiError,
+    ConfigError,
+    DecodeError,
+    EventKind,
+    OrderOutOfBounds,
+    OrderStateUnknown,
+    RateLimitError,
+    TransportError,
+)
 from grvt._runtime.transport import AiohttpTransport
 
-BEHAVIOR = load_shared("contract/behavior.json")
 KEY = "0xbfe25ff07bd38cb3fbc28a2a296d41aabd68a78c929d257935906489fc9c6d89"
-REF = re.compile(r"^\$([a-z_]+)(?:\.(\d+))?(?:\*(\d+))?([+-]\d+)?$")
 
-
-def resolve(v: Any) -> Any:
-    """Replaces every "$key", "$key.index", "$key*n" and "$key+n" string with the value from behavior.json."""
-    if isinstance(v, list):
-        return [resolve(e) for e in v]
-    if isinstance(v, dict):
-        return {k: resolve(e) for k, e in v.items()}
-    ref = REF.match(v) if isinstance(v, str) else None
-    if ref is None:
-        return v
-    value = BEHAVIOR[ref[1]]["value"]
-    if ref[2] is not None:
-        value = value[int(ref[2])]
-    if ref[3] is not None:
-        value *= int(ref[3])
-    if ref[4] is not None:
-        value += int(ref[4])
-    return value
-
-
-SCENARIOS = resolve(load_shared("scenarios/runtime.json"))
+# runtime.json with its behavior.json references already replaced by their values (sdk/generator/scenarios).
+SCENARIOS = load_shared("scenarios/runtime.resolved.json")
 
 
 class Script:
@@ -96,6 +83,8 @@ def outcome(err: BaseException | None) -> str:
         (RateLimitError, "rate_limited"),
         (ApiError, "api_error"),
         (TransportError, "transport_error"),
+        (ConfigError, "config_error"),  # before ValueError, which both subclass
+        (OrderOutOfBounds, "order_out_of_bounds"),
         (ValueError, "validation_error"),
     ):
         if isinstance(err, kind):
@@ -103,7 +92,7 @@ def outcome(err: BaseException | None) -> str:
     return "ok" if err is None else f"unexpected {err!r}"
 
 
-def order(client_order_id: str | None) -> m.OrderInput:
+def order(client_order_id: str | None, off_tick: bool = False) -> m.OrderInput:
     return m.OrderInput(
         sub_account_id="8289849667772468",
         time_in_force=grvt.enums.TimeInForce.GOOD_TILL_TIME,
@@ -111,7 +100,8 @@ def order(client_order_id: str | None) -> m.OrderInput:
             m.OrderLeg(
                 instrument="BTC_USDT_Perp",
                 size=Decimal("0.01"),  # pyright: ignore[reportArgumentType]
-                limit_price=Decimal("65000.1"),  # pyright: ignore[reportArgumentType]
+                # The instrument's tick is 0.1.
+                limit_price=Decimal("65000.15" if off_tick else "65000.1"),  # pyright: ignore[reportArgumentType]
                 is_buying_asset=True,
             )
         ],
@@ -122,7 +112,11 @@ def order(client_order_id: str | None) -> m.OrderInput:
 async def run_call(gateway, sc: dict) -> None:
     call, want, replies = sc["call"], sc["expect"], sc["replies"]
     ws = call.get("transport") == "ws"
-    route = {"read": "ticker", "write": "create_order", "countdown": "cancel_on_disconnect"}[call["kind"]]
+    bulk = call.get("bulk", False)
+    route = {"read": "ticker", "write": "bulk_orders" if bulk else "create_order", "countdown": "cancel_on_disconnect"}[
+        call["kind"]
+    ]
+    method = f"v2/{route}" if bulk else "v1/create_order"
     script = Script(replies)
 
     def rest(r, body):
@@ -146,11 +140,12 @@ async def run_call(gateway, sc: dict) -> None:
     }
     if ws:
         options["order_transport"] = "ws"
-        gateway.ignore_rpcs.add("v1/create_order")
+        gateway.ignore_rpcs.add(method)
     if "ws_request_timeout_ms" in call:
         options["ws_request_timeout"] = call["ws_request_timeout_ms"] / 1000
     reply = replies[0] if replies else {}
-    async with AsyncGrvt(gateway.env, api_key="test-key", signer=PrivateKeySigner(KEY), **options) as client:
+    api_key = None if call.get("api_key") is False else "test-key"
+    async with AsyncGrvt(gateway.env, api_key=api_key, signer=PrivateKeySigner(KEY), **options) as client:
         if ws and (reply.get("refuse") or reply.get("send_fails")):
             socket = await client.rt.socket("td").connected()
             send_str = socket.send_str
@@ -170,15 +165,21 @@ async def run_call(gateway, sc: dict) -> None:
             task = asyncio.create_task(
                 refresh_cancel_countdown(client, sub_account_id="123", countdown_seconds=call["seconds"])
             )
+        elif bulk:
+            task = asyncio.create_task(
+                client.bulk_orders(sub_account_id="8289849667772468", orders=[order(None), order(None)])
+            )
         else:
-            task = asyncio.create_task(client.create_order(order=order(call.get("client_order_id"))))
+            task = asyncio.create_task(
+                client.create_order(order=order(call.get("client_order_id"), call.get("off_tick", False)))
+            )
 
         def sent() -> list[dict]:
-            return [r["params"] for r in gateway.received if r["method"] == "v1/create_order"]
+            return [r["params"] for r in gateway.received if r["method"] == method]
 
         if ws and not (reply.get("refuse") or reply.get("send_fails")):
             await wait_until(lambda: len(sent()) == 1)
-            request = next(r for r in gateway.received if r["method"] == "v1/create_order")
+            request = next(r for r in gateway.received if r["method"] == method)
             if reply.get("drop"):
                 await gateway.drop_all()
             elif "error" in reply:
@@ -199,6 +200,11 @@ async def run_call(gateway, sc: dict) -> None:
         assert isinstance(err, OrderStateUnknown) and err.rpc == want["rpc"]
     if "retries" in want:
         assert sum(e.kind is EventKind.RETRY for e in events) == want["retries"]
+    if "events" in want:  # every event but frames, in order; only the fields each entry lists
+        got = [e for e in events if e.kind is not EventKind.FRAME]
+        assert len(got) == len(want["events"]), got
+        for e, w in zip(got, want["events"], strict=True):
+            assert {k: e.kind.value if k == "kind" else getattr(e, k) for k in w} == w, e
     if want["outcome"] == "transport_error" and "sent" in want:
         assert isinstance(err, TransportError) and err.sent == want["sent"]
     if want["outcome"] == "order_state_unknown" and "client_order_ids" in want:
@@ -206,14 +212,16 @@ async def run_call(gateway, sc: dict) -> None:
     bodies = sent() if ws else [b for r, b, _ in gateway.rest_calls if r == route]
     if "attempts" in want:
         assert (len(bodies) if ws else script.attempts) == want["attempts"]
+
+    def ids(body: dict) -> list[str]:  # the client order IDs on the wire, in order
+        return [o["metadata"]["client_order_id"] for o in body.get("orders") or [body["order"]]]
+
     if want["outcome"] == "order_state_unknown":
-        assert isinstance(err, OrderStateUnknown) and err.client_order_ids == [
-            bodies[-1]["order"]["metadata"]["client_order_id"]
-        ]
+        assert isinstance(err, OrderStateUnknown) and err.client_order_ids == ids(bodies[-1])
     if want.get("sent_client_order_id") == "generated":
-        assert 2**63 <= int(bodies[0]["order"]["metadata"]["client_order_id"]) < 2**64
+        assert all(2**63 <= int(i) < 2**64 for i in ids(bodies[0]))
     elif "sent_client_order_id" in want:
-        assert bodies[0]["order"]["metadata"]["client_order_id"] == want["sent_client_order_id"]
+        assert ids(bodies[0]) == [want["sent_client_order_id"]]
 
 
 ORDER = {  # the smallest v1.order feed that decodes
@@ -231,6 +239,8 @@ async def run_stream(gateway, sc: dict) -> None:
     options: dict[str, Any] = {**gateway.client_options, "api_key": "test-key", "on_event": events.append}
     if "resync_timeout_ms" in call:
         options["resync_timeout"] = call["resync_timeout_ms"] / 1000
+    if "idle_timeout_ms" in call:
+        options["idle_timeout"] = call["idle_timeout_ms"] / 1000
     if "queue_size" in call:
         options["queue_size"] = call["queue_size"]
     if "cookie_max_age_s" in call:
@@ -260,6 +270,10 @@ async def run_stream(gateway, sc: dict) -> None:
                 await gateway.push(call["stream"], selectors[0], *step["push"], **feed)
             elif step.get("drop"):
                 await gateway.drop_all()
+            elif step.get("silence"):
+                await gateway.silence()
+            elif "sleep_ms" in step:
+                await asyncio.sleep(step["sleep_ms"] / 1000)
             elif "ignore_subscribes" in step:
                 gateway.ignore_subscribes = step["ignore_subscribes"]
             elif "ack_latest" in step:
@@ -297,8 +311,8 @@ async def run_stream(gateway, sc: dict) -> None:
                 gaps.append({"reason": e.gap.reason, "after": e.gap.after_sequence, "through": e.gap.through_sequence})
                 if len(gaps) <= len(w["gaps"]) and "frame" in w["gaps"][len(gaps) - 1]:
                     # the legacy seq and prev; the legacy expected prev is after
-                    gaps[-1]["frame"] = [e.detail["seq"], e.detail["prev"]]
-                    assert e.detail["expected_prev"] == e.gap.after_sequence
+                    gaps[-1]["frame"] = [e.seq, e.prev]
+                    assert e.expected_prev == e.gap.after_sequence
         assert gaps == w["gaps"], selector
     for selector in selectors:
         assert sum(selector in r["params"]["selectors"] for r in gateway.subscribes()) == want["subscribes"]
@@ -317,7 +331,7 @@ def check_session(gateway, events: list, want: dict) -> None:
     if "session_rotated" in want:
         rotated = [e for e in events if e.kind is EventKind.SESSION_ROTATED]
         assert all(e.websocket_reconnect_required for e in rotated)
-        assert [e.detail["generation"] for e in rotated] == want["session_rotated"]
+        assert [e.generation for e in rotated] == want["session_rotated"]
     if "handshake_logins" in want:
         cookies = [h.get("Cookie", "") for h in gateway.handshakes]
         logins = [1 if c == "gravity=cookie-123" else int(c.rsplit("-", 1)[1]) for c in cookies]
@@ -369,28 +383,30 @@ async def run_pages(sc: dict, blocking: bool) -> None:
         assert all(p.continuity == want["continuity"] and p.gap == gap for p in read)
 
 
-def cases(calls_only: bool = False):
-    """Each scenario once; pages and backfill also run their blocking versions. calls_only: calls and streams."""
+PAGES = ("pages", "backfill")
+
+
+def marks(sc: dict) -> list:
+    reason = sc.get("skip", {}).get("python")
+    return [pytest.mark.skip(reason=reason)] if reason else []
+
+
+@pytest.mark.parametrize(
+    "sc", [pytest.param(sc, id=sc["name"], marks=marks(sc)) for sc in SCENARIOS if sc["call"]["kind"] not in PAGES]
+)
+async def test_shared_runtime_scenario(gateway, sc):
+    """Calls and streams, in each encoding: the outcome must not depend on the encoding."""
+    await (run_stream if sc["call"]["kind"] == "stream" else run_call)(gateway, sc)
+
+
+def page_cases():
+    """Pages and backfill never reach the gateway, so they run once each, plus their blocking versions."""
     for sc in SCENARIOS:
-        if calls_only and sc["call"]["kind"] in ("pages", "backfill"):
-            continue
-        reason = sc.get("skip", {}).get("python")
-        marks = [pytest.mark.skip(reason=reason)] if reason else []
-        yield pytest.param(sc, False, id=sc["name"], marks=marks)
-        if sc["call"]["kind"] in ("pages", "backfill"):
-            yield pytest.param(sc, True, id=sc["name"] + " (blocking)", marks=marks)
+        if sc["call"]["kind"] in PAGES:
+            yield pytest.param(sc, False, id=sc["name"], marks=marks(sc))
+            yield pytest.param(sc, True, id=sc["name"] + " (blocking)", marks=marks(sc))
 
 
-@pytest.mark.parametrize(("sc", "blocking"), list(cases()))
-async def test_shared_runtime_scenario(gateway, sc, blocking):
-    kind = sc["call"]["kind"]
-    if kind in ("pages", "backfill"):
-        await run_pages(sc, blocking)
-    else:
-        await (run_stream if kind == "stream" else run_call)(gateway, sc)
-
-
-@pytest.mark.parametrize(("sc", "blocking"), list(cases(calls_only=True)))
-async def test_shared_runtime_scenario_lite(lite_gateway, sc, blocking):
-    """The same calls and streams with encoding="lite": the outcome must not depend on the encoding."""
-    await (run_stream if sc["call"]["kind"] == "stream" else run_call)(lite_gateway, sc)
+@pytest.mark.parametrize(("sc", "blocking"), list(page_cases()))
+async def test_shared_pages_scenario(sc, blocking):
+    await run_pages(sc, blocking)

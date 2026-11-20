@@ -68,9 +68,7 @@ async def rest_call(
             raise err
         delay = backoff.next_delay()
         if hooks.on_event is not None:
-            hooks.emit(
-                Event(EventKind.RETRY, rpc=spec.method, detail={"attempt": attempt, "delay": delay, "error": str(err)})
-            )
+            hooks.emit(Event(EventKind.RETRY, rpc=spec.method, attempt=attempt, delay=delay, error=str(err)))
         await asyncio.sleep(delay)
 
 

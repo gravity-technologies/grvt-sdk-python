@@ -10,6 +10,8 @@ from decimal import Context, Decimal, Inexact, InvalidOperation, Overflow
 from functools import lru_cache
 from typing import Any
 
+from ..errors import SigningError
+
 
 def json_object(value: Any) -> dict[str, Any] | None:
     """value as a JSON object, or None when it is not one."""
@@ -49,19 +51,19 @@ def _scaled(value: Any, decimals: int) -> int:
         ):
             if len(frac) > decimals:
                 if frac[decimals:].strip("0"):
-                    raise ValueError(f"{value} has more than {decimals} decimal places")
+                    raise SigningError(f"{value} has more than {decimals} decimal places")
                 frac = frac[:decimals]
             return int(whole + frac + "0" * (decimals - len(frac)))
     try:
         d = value if isinstance(value, Decimal) else Decimal(str(value))
     except InvalidOperation:
-        raise ValueError(f"not a decimal: {value!r}") from None
+        raise SigningError(f"not a decimal: {value!r}") from None
     try:
         n = d.scaleb(decimals, context=_EXACT)
     except (Inexact, Overflow):
-        raise ValueError(f"cannot scale {value!r} by 10^{decimals} exactly") from None
+        raise SigningError(f"cannot scale {value!r} by 10^{decimals} exactly") from None
     if n != n.to_integral_value(context=_EXACT):
-        raise ValueError(f"{value} has more than {decimals} decimal places")
+        raise SigningError(f"{value} has more than {decimals} decimal places")
     return int(n)
 
 
@@ -83,5 +85,5 @@ def to_address(value: Any) -> str:
     if not s.startswith("0x"):
         s = "0x" + s
     if len(s) != 42:
-        raise ValueError(f"not an address: {value!r}")
+        raise SigningError(f"not an address: {value!r}")
     return s

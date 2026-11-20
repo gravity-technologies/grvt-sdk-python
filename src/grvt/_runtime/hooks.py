@@ -1,8 +1,9 @@
 """User hooks.
 
 before_send(call)  runs before signing for every RPC (REST or WS). It may change `call.params`
-                   or return a new Call. It runs before signing, so nothing can change a request
-                   after it is signed.
+                   or return a new Call, but must not add, remove or reorder orders, or change their client order IDs (that raises
+                   ConfigError and sends nothing). It runs before signing, so nothing can change a
+                   request after it is signed.
 on_event(event)    read-only listener for connection and stream events. Must not block.
 
 When a hook is not set the runtime skips it with a single `is None` check.
@@ -47,20 +48,59 @@ class GapRange:
     reason: str
 
 
+# The kind-specific attributes each `detail` dict holds, as before the attributes existed ("dir" was direction).
+_DETAIL: dict[EventKind, tuple[str, ...]] = {
+    EventKind.DISCONNECT: ("code", "reason"),
+    EventKind.SUBSCRIBE: ("latest_sequence_number", "num_snapshots"),
+    EventKind.GAP: ("expected_prev", "prev", "seq"),
+    EventKind.RETRY: ("attempt", "delay", "error"),
+    EventKind.FRAME: ("direction",),
+    EventKind.SESSION_ROTATED: ("generation", "expires_at"),
+    EventKind.ERROR: ("fatal", "error"),
+}
+
+
 @dataclass(slots=True)
 class Event:
+    """What on_event receives. Only the attributes that apply to `kind` are set; the rest stay None.
+
+    The kinds, their attributes and when each is emitted are the `events` table in sdk/contract/behavior.json.
+    """
+
     kind: EventKind
-    gap: GapRange | None = None
+    gap: GapRange | None = None  # GAP: the recovery bounds
     websocket_reconnect_required: bool | None = None  # SESSION_ROTATED, not a continuity guarantee
-    socket: str | None = None  # "md" | "td" | None for REST
-    stream: str | None = None
-    selector: str | None = None
-    rpc: str | None = None
-    # expected_prev/prev/seq are sequence_mismatch diagnostics only; gap owns recovery bounds.
-    detail: dict[str, Any] = field(default_factory=dict[str, Any])
-    # FRAME only: raw bytes as sent/received ("in"/"out" in detail["dir"]). NOT redacted.
+    socket: str | None = None  # "md" | "td"; None for REST and session events
+    stream: str | None = None  # SUBSCRIBE, GAP
+    selector: str | None = None  # SUBSCRIBE, GAP
+    rpc: str | None = None  # RETRY of a read
+    # FRAME only: raw bytes as sent or received. NOT redacted.
     raw: bytes | None = None
     ts: float = field(default_factory=time.time)
+    code: int | None = None  # DISCONNECT: the close code, if any
+    reason: str | None = None  # DISCONNECT
+    latest_sequence_number: int | None = None  # SUBSCRIBE
+    num_snapshots: int | None = None  # SUBSCRIBE
+    # GAP of a sequence_mismatch only: diagnostics; gap owns the recovery bounds.
+    expected_prev: int | None = None
+    prev: int | None = None
+    seq: int | None = None
+    attempt: int | None = None  # RETRY, counting from 1
+    delay: float | None = None  # RETRY: seconds before the next try
+    error: str | None = None  # RETRY, ERROR
+    fatal: bool | None = None  # ERROR: the socket stopped for good
+    direction: str | None = None  # FRAME: "in" or "out"
+    generation: int | None = None  # SESSION_ROTATED
+    expires_at: float | None = None  # SESSION_ROTATED: Unix seconds
+
+    @property
+    def detail(self) -> dict[str, Any]:
+        """The kind's attributes as a dict, kept for code written before they were attributes ("dir" for a frame's
+        direction). Read the attributes instead."""
+        out = {name: getattr(self, name) for name in _DETAIL.get(self.kind, ())}
+        if "direction" in out:
+            out["dir"] = out.pop("direction")
+        return out
 
 
 @dataclass(slots=True)

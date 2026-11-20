@@ -8,10 +8,11 @@ What a socket does:
 - detects sequence gaps and re-subscribes the same selector for a fresh snapshot; escalates to a
   reconnect if that snapshot does not come within `resync_timeout`
 - the read loop only parses the envelope and enqueues; consumers decode. It never awaits a consumer.
+- a connection with no frame of any kind (data, ping or pong) for `idle_timeout` is dropped and
+  reconnected; the watchdog pings every third of it, so a quiet but healthy connection has pongs
 
-Server facts: the server pings every 5s (aiohttp answers automatically);
-a client whose outgoing queue fills is closed with 1008 "slow consumer"; frames above ReadLimitSize
-are rejected.
+Server facts: the server pings every 5s; a client whose outgoing queue fills is closed with 1008
+"slow consumer"; frames above ReadLimitSize are rejected.
 """
 
 # Subscription and WsSocket are one unit: the socket drives each subscription's queue and ack directly.
@@ -35,6 +36,7 @@ from .auth import Session
 from .deadline import CallDeadline
 from .errors import (
     ApiError,
+    ConfigError,
     DecodeError,
     FrameTooLarge,
     GrvtError,
@@ -50,10 +52,6 @@ from .spec import StreamSpec
 
 if TYPE_CHECKING:
     from . import lite as _lite
-
-HEARTBEAT = 10.0  # client ping; aiohttp closes the socket if the pong does not come back in time
-CONNECT_TIMEOUT = 10.0
-MAX_INCOMING = 64 * 1024 * 1024
 
 
 T = TypeVar("T")
@@ -175,6 +173,7 @@ class WsSocket:
         max_frame_bytes: int | None = None,
         request_timeout: float = behavior.WS_REQUEST_TIMEOUT,
         resync_timeout: float = behavior.RESYNC_TIMEOUT,
+        idle_timeout: float = behavior.WS_IDLE_TIMEOUT,
         use_global_sequence_number: bool = True,
         on_session: Callable[[], None] | None = None,
         lite: bool = False,
@@ -197,6 +196,7 @@ class WsSocket:
         self.max_frame_bytes = max_frame_bytes
         self.request_timeout = request_timeout
         self.resync_timeout = resync_timeout
+        self.idle_timeout = idle_timeout
         self.use_global_sequence_number = use_global_sequence_number
         self.requests = RequestTable()
         self.backoff = Backoff()
@@ -212,6 +212,8 @@ class WsSocket:
         self._connected_once = False
         self._session_gen = 0
         self._reconnect_reason: str | None = None
+        self._last_rx = 0.0  # monotonic time of the last frame of any kind on the current connection
+        self._last_ping = 0.0
 
     # -- lifecycle --------------------------------------------------------------------
     def _start(self) -> None:
@@ -219,7 +221,7 @@ class WsSocket:
             self._task = asyncio.create_task(self._supervise(), name=f"grvt-ws-{self.name}")
             self._watchdog = asyncio.create_task(self._watch(), name=f"grvt-ws-{self.name}-watchdog")
 
-    async def connected(self, timeout: float = CONNECT_TIMEOUT) -> aiohttp.ClientWebSocketResponse:
+    async def connected(self, timeout: float = behavior.WS_CONNECT_TIMEOUT) -> aiohttp.ClientWebSocketResponse:
         self._start()
         if self._fatal is not None:
             raise self._fatal
@@ -278,7 +280,7 @@ class WsSocket:
                 await self._sleep_backoff(e)
                 continue
 
-            up_since = time.monotonic()
+            up_since = self._last_rx = self._last_ping = time.monotonic()
             self._ws = ws
             kind = EventKind.RECONNECT if self._connected_once else EventKind.CONNECT
             self._connected_once = True
@@ -289,7 +291,7 @@ class WsSocket:
                 await self._send_subscribe(sub)
 
             await self._read_loop(ws)
-            if time.monotonic() - up_since > 10.0:
+            if time.monotonic() - up_since > behavior.RECONNECT_BACKOFF_RESET_AFTER:
                 self.backoff.reset()  # only a connection that stayed up resets the backoff
 
             self._up.clear()
@@ -311,7 +313,7 @@ class WsSocket:
                     )
                 sub.seq.reset()
             if self.hooks.on_event is not None:
-                self.hooks.emit(Event(EventKind.DISCONNECT, socket=self.name, detail={"code": code, "reason": reason}))
+                self.hooks.emit(Event(EventKind.DISCONNECT, socket=self.name, code=code, reason=reason))
             if not self._closing:
                 await asyncio.sleep(self.backoff.next_delay())
 
@@ -319,14 +321,16 @@ class WsSocket:
         delay = self.backoff.next_delay()
         log.debug("grvt: %s connect failed (%s); retry in %.2fs", self.name, err, delay)
         if self.hooks.on_event is not None:
-            self.hooks.emit(Event(EventKind.RETRY, socket=self.name, detail={"delay": delay, "error": str(err)}))
+            self.hooks.emit(
+                Event(EventKind.RETRY, socket=self.name, attempt=self.backoff.attempt, delay=delay, error=str(err))
+            )
         await asyncio.sleep(delay)
 
     def _go_fatal(self, err: GrvtError) -> None:
         self._fatal = err
         self._up.set()  # wake waiters so they see the error
         if self.hooks.on_event is not None:
-            self.hooks.emit(Event(EventKind.ERROR, socket=self.name, detail={"fatal": True, "error": str(err)}))
+            self.hooks.emit(Event(EventKind.ERROR, socket=self.name, fatal=True, error=str(err)))
         for sub in self._subs.values():
             sub._fail(err)
 
@@ -345,12 +349,13 @@ class WsSocket:
         try:
             # aiohttp declares ClientWSTimeout's fields with attr.ib, which pyright cannot see.
             timeout = aiohttp.ClientWSTimeout(ws_close=5.0)  # pyright: ignore[reportCallIssue]
+            # No aiohttp heartbeat, and pings come to the read loop: the idle check in _watch must see
+            # every frame, control frames included.
             return await self._http.ws_connect(
                 self.url,
                 headers=headers,
-                heartbeat=HEARTBEAT,
-                autoping=True,
-                max_msg_size=MAX_INCOMING,
+                autoping=False,
+                max_msg_size=behavior.WS_MAX_INCOMING_FRAME,
                 timeout=timeout,
             )
         except aiohttp.WSServerHandshakeError as e:
@@ -364,10 +369,13 @@ class WsSocket:
     async def _read_loop(self, ws: aiohttp.ClientWebSocketResponse) -> None:
         try:
             async for msg in ws:
+                self._last_rx = time.monotonic()
                 if msg.type is aiohttp.WSMsgType.TEXT:
                     self._on_frame(msg.data.encode())
                 elif msg.type is aiohttp.WSMsgType.BINARY:
                     self._on_frame(msg.data)
+                elif msg.type is aiohttp.WSMsgType.PING:
+                    await ws.pong(msg.data)
                 elif msg.type is aiohttp.WSMsgType.ERROR:
                     break
         except asyncio.CancelledError:
@@ -375,13 +383,13 @@ class WsSocket:
         except Exception as e:  # noqa: BLE001 - a broken frame handler must not kill the supervisor
             log.exception("grvt: %s read loop error", self.name)
             if self.hooks.on_event is not None:
-                self.hooks.emit(Event(EventKind.ERROR, socket=self.name, detail={"error": repr(e)}))
+                self.hooks.emit(Event(EventKind.ERROR, socket=self.name, fatal=False, error=repr(e)))
             await ws.close()
 
     # -- incoming ---------------------------------------------------------------------
     def _on_frame(self, data: bytes) -> None:
         if self.hooks.on_event is not None:
-            self.hooks.emit(Event(EventKind.FRAME, socket=self.name, raw=data, detail={"dir": "in"}))
+            self.hooks.emit(Event(EventKind.FRAME, socket=self.name, raw=data, direction="in"))
         if debug_enabled():
             log.debug("grvt: %s <- %s", self.name, redact(data[:2000]))
         try:
@@ -440,11 +448,9 @@ class WsSocket:
                         socket=self.name,
                         stream=sub.spec.stream,
                         selector=f.selector,
-                        detail={
-                            "expected_prev": sub.seq.last,
-                            "prev": f.prev_sequence_number,
-                            "seq": f.sequence_number,
-                        },
+                        expected_prev=sub.seq.last,
+                        prev=f.prev_sequence_number,
+                        seq=f.sequence_number,
                     )
                 )
             if sub.spec.snapshot_feed:  # each frame is complete; just move on
@@ -526,7 +532,8 @@ class WsSocket:
                     socket=self.name,
                     stream=sub.spec.stream,
                     selector=canonical,
-                    detail={"latest_sequence_number": latest, "num_snapshots": snaps},
+                    latest_sequence_number=latest,
+                    num_snapshots=snaps,
                 )
             )
 
@@ -576,7 +583,7 @@ class WsSocket:
         """Send one JSON-RPC request; returns the raw `result` (msgspec.Raw)."""
         wait = self.request_timeout if timeout is None else timeout
         if not isfinite(wait) or wait <= 0:
-            raise ValueError("timeout must be finite and positive")
+            raise ConfigError("timeout must be finite and positive")
         ws = await self.connected()  # failure here: nothing was sent
         loop = asyncio.get_running_loop()
         if deadline is not None:
@@ -621,15 +628,11 @@ class WsSocket:
     ) -> None:
         if self.max_frame_bytes is not None and len(frame) > self.max_frame_bytes:
             # TODO: fall back to REST for this call once the runtime can tell the RPC is safe to reroute.
-            raise FrameTooLarge(
-                f"frame is {len(frame)} bytes, server limit {self.max_frame_bytes}; "
-                f"use order_transport='rest' for this call",
-                sent=False,
-            )
+            raise FrameTooLarge(len(frame), self.max_frame_bytes)
         if ws.closed:
             raise TransportError("socket closed before send", sent=False)
         if self.hooks.on_event is not None:
-            self.hooks.emit(Event(EventKind.FRAME, socket=self.name, raw=frame, detail={"dir": "out"}))
+            self.hooks.emit(Event(EventKind.FRAME, socket=self.name, raw=frame, direction="out"))
         if debug_enabled():
             log.debug("grvt: %s -> %s", self.name, redact(frame))
         if on_dispatch is not None:
@@ -653,13 +656,20 @@ class WsSocket:
             else:
                 p.waiter.set_exception(TransportError(reason, rpc=p.method, sent=True))
 
-    # -- watchdog: overdue resyncs and session rotation --------------------------------------
+    # -- watchdog: overdue resyncs, session rotation, idle connections and pings ------------
     async def _watch(self) -> None:
         while not self._closing:
-            await asyncio.sleep(0.5)
-            if self._ws is None or self._ws.closed:
+            await asyncio.sleep(behavior.WATCHDOG_INTERVAL)
+            ws = self._ws
+            if ws is None or ws.closed:
                 continue
             now = time.monotonic()
+            if now - self._last_rx > self.idle_timeout:
+                self.force_reconnect(f"no frames for {self.idle_timeout}s")
+                continue
+            if now - self._last_ping >= self.idle_timeout / 3:
+                self._last_ping = now
+                asyncio.ensure_future(ws.ping()).add_done_callback(_consume_exception)
             for sub in self._subs.values():
                 if sub.seq.resync_overdue(now, self.resync_timeout):
                     sub.seq.resync_started = None

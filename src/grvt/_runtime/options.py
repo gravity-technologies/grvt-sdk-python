@@ -5,6 +5,7 @@ from math import isfinite
 from typing import Literal, TypedDict
 
 from .clock import ClientOrderIdProvider, Clock, NonceProvider
+from .errors import ConfigError
 from .hooks import BeforeSend, OnEvent
 from .transport import HttpTransport
 
@@ -25,6 +26,7 @@ class ClientOptions(TypedDict, total=False):
     call_timeout: float
     ws_request_timeout: float
     resync_timeout: float
+    idle_timeout: float
     queue_size: int
 
 
@@ -40,4 +42,4 @@ class CallOptions:
 
     def __post_init__(self) -> None:
         if self.timeout is not None and (not isfinite(self.timeout) or self.timeout <= 0):
-            raise ValueError("timeout must be finite and positive")
+            raise ConfigError("timeout must be finite and positive")

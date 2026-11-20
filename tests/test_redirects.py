@@ -31,7 +31,7 @@ async def test_ws_redirect_never_sends_second_handshake(gateway, status, cross_o
         app = web.Application()
         app.router.add_get("/ws", redirect)
         app.router.add_route("*", "/target", target)
-        async with TestServer(app) as server, Runtime(gateway.env, encoding="full", api_key="test-key") as rt:
+        async with TestServer(app) as server, Runtime(gateway.env, **gateway.client_options, api_key="test-key") as rt:
             await rt.session.ensure()
             socket = WsSocket("td", str(server.make_url("/ws")), rt.session, Hooks())
             try:

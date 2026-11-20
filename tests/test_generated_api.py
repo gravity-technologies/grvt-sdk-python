@@ -73,8 +73,7 @@ def test_error_table_registered():
     assert type(e).__name__ == "SignatureExpiredError" and isinstance(e, grvt.ApiError)
 
 
-async def test_create_order_round_trip(any_gateway):
-    gateway = any_gateway
+async def test_create_order_round_trip(gateway):
 
     def rest(route, body):
         if route == "instrument":
@@ -130,8 +129,7 @@ async def test_create_order_round_trip(any_gateway):
     assert who.lower() == signer.address and sig["chain_id"] == "326"
 
 
-async def test_bulk_orders_signs_each_order(any_gateway):
-    gateway = any_gateway
+async def test_bulk_orders_signs_each_order(gateway):
 
     def rest(route, body):
         if route == "instrument":
@@ -191,8 +189,7 @@ async def test_bulk_orders_signs_each_order(any_gateway):
         assert who.lower() == signer.address
 
 
-async def test_stream_method_builds_selector(any_gateway):
-    gateway = any_gateway
+async def test_stream_method_builds_selector(gateway):
     async with AsyncGrvt(gateway.env, **gateway.client_options) as client:
         sub = client.orderbook_delta_stream(instrument="BTC_USDT_Perp", rate=500)
         assert isinstance(sub, Subscription)
@@ -203,7 +200,7 @@ async def test_stream_method_builds_selector(any_gateway):
 
 
 def test_sync_client(gateway_sync):
-    client = Grvt(gateway_sync, encoding="full")
+    client = Grvt(gateway_sync.env, **gateway_sync.client_options)
     try:
         out = client.get_instrument(instrument="X")
         assert out.result is None or isinstance(out, m.ApiGetInstrumentResponse)
@@ -232,7 +229,9 @@ async def test_transfer_and_withdrawal_need_no_signature_from_the_caller(gateway
         return 200, {"result": {"ack": True}} if route == "withdrawal" else {"result": {"ack": True, "tx_id": "1"}}
 
     gateway.rest_handler = rest
-    async with AsyncGrvt(gateway.env, encoding="full", api_key="test-key", signer=PrivateKeySigner(KEY)) as client:
+    async with AsyncGrvt(
+        gateway.env, **gateway.client_options, api_key="test-key", signer=PrivateKeySigner(KEY)
+    ) as client:
         await client.transfer(
             from_account_id="0x" + "11" * 20,
             from_sub_account_id=0,

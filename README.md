@@ -3,7 +3,7 @@
 The Python client for the Grvt exchange: REST calls, WebSocket streams, order entry, signing and login in one
 package.
 
-> **Preview:** any 0.x release can change the API, so pin the exact version you install (for example in
+> **Preview.** Any 0.x release can change the API, so pin the exact version you install (for example in
 > requirements.txt).
 
 ## Install
@@ -77,15 +77,7 @@ the examples.
 
 ## Known limitations
 
-- Over WebSocket order entry, the server may process requests out of order, so a cancel can overtake its
-  create. Wait for the create's reply before you cancel.
-- Private streams can't resume from a sequence number. After a gap or reconnect, fill missed events from REST
-  history.
-- No re-login after a WebSocket auth failure: a subscribe rejected for auth raises to your code, and a rejected
-  handshake (401/403) or failed API-key login stops reconnecting for good.
-- Session renewal closes and reopens every socket of the client, so every stream gets a gap.
-- Wallet login isn't supported (API-key sessions only), and signing covers Grvt's own message types only.
-- Response fields the SDK doesn't know are dropped, not kept.
+See [Not supported yet](https://developers.grvt.io/sdks/python#not-supported-yet) on the Python SDK page.
 
 ## Contributing
 

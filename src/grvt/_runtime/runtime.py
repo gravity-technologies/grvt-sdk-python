@@ -21,7 +21,16 @@ from .auth import LOGIN_PATH, Session
 from .clock import ClientOrderIdProvider, Clock, NonceProvider, RandomNonce, SystemClock, TimeCounterClientOrderId
 from .deadline import CallDeadline
 from .env import Environment, resolve_env
-from .errors import ApiError, DecodeError, GrvtError, OrderStateUnknown, uncertain_api_error
+from .errors import (
+    ApiError,
+    ClosedError,
+    ConfigError,
+    DecodeError,
+    GrvtError,
+    OrderStateUnknown,
+    SigningError,
+    uncertain_api_error,
+)
 from .hooks import BeforeSend, Call, Event, EventKind, Hooks, OnEvent
 from .log import configure_from_env, log
 from .rest import rest_call
@@ -85,6 +94,17 @@ class MetadataCache:
         self._values.pop((kind, key), None)
 
 
+def _order_ids(params: Any) -> list[Any]:
+    """The orders' client order IDs, in order (params is a model or a dict)."""
+    request = codec.decode(codec.encode(params))
+    if not isinstance(request, dict):
+        return []
+    request = cast(dict[str, Any], request)
+    orders: list[Any] = request.get("orders", [request.get("order")]) or []
+    metadata = [cast(dict[str, Any], o).get("metadata") if isinstance(o, dict) else None for o in orders]
+    return [cast(dict[str, Any], m).get("client_order_id") if isinstance(m, dict) else None for m in metadata]
+
+
 class Runtime:
     def __init__(
         self,
@@ -106,12 +126,13 @@ class Runtime:
         call_timeout: float = behavior.CALL_TIMEOUT,
         ws_request_timeout: float = behavior.WS_REQUEST_TIMEOUT,
         resync_timeout: float = behavior.RESYNC_TIMEOUT,
+        idle_timeout: float = behavior.WS_IDLE_TIMEOUT,
         queue_size: int = behavior.QUEUE_SIZE,
     ) -> None:
         if order_transport not in ("rest", "ws"):
-            raise ValueError("order_transport must be 'rest' or 'ws'")
+            raise ConfigError("order_transport must be 'rest' or 'ws'")
         if encoding not in ("full", "lite"):
-            raise ValueError("encoding must be 'full' or 'lite'")
+            raise ConfigError("encoding must be 'full' or 'lite'")
         self.sub_account_id = self.account(sub_account_id, required=False)
         configure_from_env()
         self.env = resolve_env(env, encoding)
@@ -135,9 +156,12 @@ class Runtime:
             ("call_timeout", call_timeout),
             ("ws_request_timeout", ws_request_timeout),
             ("resync_timeout", resync_timeout),
+            ("idle_timeout", idle_timeout),
         ):
             if not isfinite(value) or value <= 0:
-                raise ValueError(f"{name} must be finite and positive")
+                raise ConfigError(f"{name} must be finite and positive")
+        if queue_size < behavior.QUEUE_SIZE_MIN:
+            raise ConfigError(f"queue_size must be at least {behavior.QUEUE_SIZE_MIN}")
         self.http_attempt_timeout = http_attempt_timeout
         self.call_timeout = call_timeout
         self._closed = False
@@ -154,6 +178,7 @@ class Runtime:
                 max_frame_bytes=self.env.ws_max_frame_bytes,
                 request_timeout=ws_request_timeout,
                 resync_timeout=resync_timeout,
+                idle_timeout=idle_timeout,
                 on_session=self._start_rotation,
                 lite=self._lite,
             )
@@ -195,11 +220,11 @@ class Runtime:
             value = getattr(self, "sub_account_id", None)
         if value is None:
             if required:
-                raise ValueError("sub_account_id is required when no client default is configured")
+                raise ConfigError("sub_account_id is required when no client default is configured")
             return None
         text = str(value)
         if not text.isascii() or not text.isdigit() or not 0 < int(text) <= 2**64 - 1:
-            raise ValueError("sub_account_id must be a positive uint64")
+            raise ConfigError("sub_account_id must be a positive uint64")
         return str(int(text))
 
     async def call(
@@ -212,10 +237,10 @@ class Runtime:
         timeout: float | None = None,
     ) -> Any:
         if self._closed:
-            raise GrvtError("client closed")
+            raise ClosedError()
         total = self.call_timeout if timeout is None else timeout
         if not isfinite(total) or total <= 0:
-            raise ValueError("timeout must be finite and positive")
+            raise ConfigError("timeout must be finite and positive")
         deadline = CallDeadline(total)
         budget = asyncio.timeout_at(deadline.expires)
         try:
@@ -237,26 +262,23 @@ class Runtime:
         deadline.check()
         via = "ws" if rpc.order_entry and self.order_transport == "ws" else "rest"
         if self.hooks.before_send is not None:
+            # The IDs are how an unknown outcome is looked up, so they must be the ones the caller knows.
+            ids = None if client_order_id is None else _order_ids(params)
             params = (await self.hooks.run_before_send(Call(rpc.method, params, via))).params
+            if ids is not None and _order_ids(params) != ids:
+                raise ConfigError(
+                    f"{rpc.method}: before_send must not add, remove or reorder orders, or change their client order IDs"
+                )
         deadline.check()
         if sign is not None:
             params = await sign(self, params)  # nothing may change the request after this line
         deadline.check()
         body = _EMPTY if params is None else codec.encode(params)
-        final = codec.decode(body)
-        if isinstance(final, dict) and ("order" in final or "orders" in final):
-            final = cast(dict[str, Any], final)
-            orders: list[dict[str, Any]] = final.get("orders", [final.get("order")])
-            client_order_id = [
-                o["metadata"]["client_order_id"]
-                for o in orders or []
-                if o.get("metadata", {}).get("client_order_id") is not None
-            ]
         wire = body
         if self._lite:
             if rpc.lite_path is None or rpc.request_type is None:
                 if via == "ws":
-                    raise GrvtError(f"{rpc.method} has no lite form to send over a lite WebSocket")
+                    raise ConfigError(f"{rpc.method} has no lite form to send over a lite WebSocket")
             elif params is not None:
                 wire = self._lite_codec.encode(rpc.request_type, params)
         try:
@@ -309,8 +331,8 @@ class Runtime:
         )
 
     # -- streams ----------------------------------------------------------------------------
-    def stream(self, spec: StreamSpec, selector: str, *, queue_size: int | None = None) -> Subscription[Any]:
-        return Subscription(self._sockets[spec.gateway], spec, selector, queue_size or self.queue_size)
+    def stream(self, spec: StreamSpec, selector: str) -> Subscription[Any]:
+        return Subscription(self._sockets[spec.gateway], spec, selector, self.queue_size)
 
     # -- signing ----------------------------------------------------------------------------
     @property
@@ -320,7 +342,7 @@ class Runtime:
     async def sign(self, struct: StructType, message: dict[str, Any], *, chain_id: int | None = None) -> Signature:
         """Sign with the Grvt domain for `chain_id` (default: this environment's chain id)."""
         if self.signer is None:
-            raise GrvtError("this call needs a signer: pass signer=PrivateKeySigner(...)")
+            raise ConfigError("this call needs a signer: pass signer=PrivateKeySigner(...)")
         domain = self._domain if chain_id in (None, self.env.chain_id) else grvt_domain(chain_id)
         if type(self.signer) is PrivateKeySigner:  # in-process key: sign our digest directly
             return self.signer.sign_digest(struct.digest(domain, message))
@@ -328,13 +350,13 @@ class Runtime:
         sig = await self.signer.sign_typed(domain, struct, message)
         why = check_signature(struct.digest(domain, message), sig, self.signer.address)
         if why is not None:
-            raise GrvtError(f"signer {self.signer.address} returned an invalid signature: {why}")
+            raise SigningError(f"signer {self.signer.address} returned an invalid signature: {why}")
         return sig
 
     # -- session ----------------------------------------------------------------------------
     async def _ensure_session(self) -> None:
         if not self.session.enabled:
-            raise GrvtError("this call needs a session: pass api_key=...")
+            raise ConfigError("this call needs a session: pass api_key=...")
         await self.session.ensure()
         self._start_rotation()
 
@@ -344,22 +366,27 @@ class Runtime:
             self._rotation = asyncio.create_task(self._rotate_forever(), name="grvt-session-rotation")
 
     async def _rotate_forever(self) -> None:
+        # One wait per try: until the renewal is due, but at least the floor. After a failed login the floor is
+        # the retry delay, so the next try comes session_retry_delay later, as in the other SDKs.
+        floor = behavior.SESSION_RENEW_MIN_WAIT
         while True:
-            await asyncio.sleep(max(1.0, self.session.refresh_due() - time.time()))
+            await asyncio.sleep(max(floor, self.session.refresh_due() - time.time()))
             try:
                 await self.session.login()
             except GrvtError as e:
                 log.warning("grvt: session re-login failed: %s", e)
                 if self.hooks.on_event is not None:
-                    self.hooks.emit(Event(EventKind.ERROR, detail={"error": str(e), "where": "session"}))
-                await asyncio.sleep(self._session_retry_delay)
+                    self.hooks.emit(Event(EventKind.ERROR, fatal=False, error=f"session: {e}"))
+                floor = self._session_retry_delay
                 continue
+            floor = behavior.SESSION_RENEW_MIN_WAIT
             if self.hooks.on_event is not None:
                 self.hooks.emit(
                     Event(
                         EventKind.SESSION_ROTATED,
                         websocket_reconnect_required=True,
-                        detail={"generation": self.session.generation, "expires_at": self.session.expires_at},
+                        generation=self.session.generation,
+                        expires_at=self.session.expires_at,
                     )
                 )
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, NotRequired, TypedDict
 
-from ..errors import OrderOutOfBounds
+from ..errors import OrderOutOfBounds, SigningError
 from .transforms import json_list, json_object, scaled
 
 if TYPE_CHECKING:
@@ -61,7 +61,7 @@ def _ceil_div(a: int, b: int) -> int:
 
 
 def check_order(checks: OrderChecks, order: Any, meta: Meta) -> None:
-    """Raise OrderOutOfBounds for the first leg value outside its instrument's limits (ValueError when malformed)."""
+    """Raise OrderOutOfBounds for the first leg value outside its instrument's limits (SigningError when malformed)."""
     order_obj = json_object(order)
     if order_obj is None:
         return
@@ -110,9 +110,9 @@ def _check_leg(checks: OrderChecks, rules: list[OrderRule], index: int, leg: Any
         try:
             n = scaled(raw, decimals(field))
         except ValueError as e:
-            raise ValueError(f"OrderLeg.{field}: {e}") from None
+            raise SigningError(f"OrderLeg.{field}: {e}") from None
         if n < 0 or n > _U64_MAX:
-            raise ValueError(f"OrderLeg.{field}: {raw} is out of range")
+            raise SigningError(f"OrderLeg.{field}: {raw} is out of range")
         values[field] = n
         return n
 
@@ -123,7 +123,7 @@ def _check_leg(checks: OrderChecks, rules: list[OrderRule], index: int, leg: Any
         try:
             return scaled(raw, d)
         except ValueError as e:
-            raise ValueError(f"instrument {name} {field}: {e}") from None
+            raise SigningError(f"instrument {name} {field}: {e}") from None
 
     for field in scales:  # a malformed value is reported as such, whatever the rules
         value(field)

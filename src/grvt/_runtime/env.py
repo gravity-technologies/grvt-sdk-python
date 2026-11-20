@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .errors import ConfigError
+
 _FULL_WS_PATH = "/ws/full"
 _LITE_WS_PATH = "/ws/lite"
 
@@ -41,7 +43,7 @@ class Environment:
         if explicit and explicit.strip():
             return explicit
         if not url.endswith(_FULL_WS_PATH):
-            raise ValueError(
+            raise ConfigError(
                 f"environment {self.name!r}: {url} does not end in {_FULL_WS_PATH}, so it has no lite URL; set {field}"
             )
         return url[: -len(_FULL_WS_PATH)] + _LITE_WS_PATH
@@ -74,7 +76,7 @@ def resolve_env(env: str | Environment, encoding: str = "lite") -> Environment:
     try:
         return ENVIRONMENTS[env]
     except KeyError:
-        raise ValueError(f"unknown env {env!r}; use one of {sorted(ENVIRONMENTS)} or pass an Environment") from None
+        raise ConfigError(f"unknown env {env!r}; use one of {sorted(ENVIRONMENTS)} or pass an Environment") from None
 
 
 def validate_env(env: Environment, encoding: str = "lite") -> None:
@@ -89,7 +91,7 @@ def validate_env(env: Environment, encoding: str = "lite") -> None:
     if not env.chain_id or env.chain_id <= 0:
         missing.append("chain_id")
     if missing:
-        raise ValueError(
+        raise ConfigError(
             f"environment {env.name!r} is missing {', '.join(missing)}: a custom Environment must set every URL "
             "and the chain id"
         )

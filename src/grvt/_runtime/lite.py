@@ -23,6 +23,7 @@ import msgspec
 
 from .._generated import lite as gen
 from . import codec
+from .errors import ConfigError
 
 _Decoder = Callable[[bytes], Any]
 _scalar = codec._decode_scalar  # pyright: ignore[reportPrivateUsage]  (the same scalar rules as full)
@@ -62,7 +63,7 @@ def encode(type: Any, obj: Any) -> bytes:
     try:
         return codec.encode(to_lite(obj))
     except AttributeError as e:
-        raise ValueError(f"lite encoding: {type.__name__} request: {e}") from e
+        raise ConfigError(f"lite encoding: {type.__name__} request: {e}") from e
 
 
 def _from_dict(type: Any, obj: dict[str, Any]) -> Any:
@@ -70,7 +71,7 @@ def _from_dict(type: Any, obj: dict[str, Any]) -> Any:
     model = codec.convert(obj, type)
     unknown = _dropped(obj, codec.to_builtins(model), "")
     if unknown:
-        raise ValueError(f"lite encoding: {type.__name__} has no field {unknown}, so the server would ignore it")
+        raise ConfigError(f"lite encoding: {type.__name__} has no field {unknown}, so the server would ignore it")
     return model
 
 

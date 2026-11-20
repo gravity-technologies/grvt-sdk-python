@@ -1,7 +1,7 @@
 """The lite encoding: per-type tables, encode/decode, the lite envelope, and lite clients on the fake gateway.
 
-The shared runtime scenarios also run in lite (test_scenarios.py), and so do the generated round trips that take
-`any_gateway`; the lite fake fails any test whose client sent a key that is not a lite name.
+Every test that takes the `gateway` fixture also runs in lite (conftest.py), so this file holds only what is
+about lite itself; the lite fake fails any test whose client sent a key that is not a lite name.
 """
 
 from __future__ import annotations
@@ -196,10 +196,10 @@ def test_custom_env_lite_ws_urls():
     assert Runtime(dataclasses.replace(odd, md_ws_lite_url="wss://md/lite")).socket("md").url == "wss://md/lite"
 
 
-async def test_lite_reads_match_full(gateway, lite_gateway):
+async def test_lite_reads_match_full(full_gateway, lite_gateway):
     """The same call on each fake decodes to the same model; the lite one went to the lite path with lite keys."""
     got = []
-    for gw in (gateway, lite_gateway):
+    for gw in (full_gateway, lite_gateway):
         async with AsyncGrvt(gw.env, **gw.client_options) as client:
             got.append(await client.get_instrument(instrument="ETH_USDT_Perp"))
     assert got[0] == got[1] and got[1].result.instrument == "ETH_USDT_Perp"
@@ -216,17 +216,19 @@ async def test_lite_http_error_body(lite_gateway):
 
 async def test_lite_ws_rpc_and_error(lite_gateway):
     lite_gateway.ws_results["v1/cancel_order"] = {"result": {"ack": True}}  # double-wrapped, as the server does
-    async with AsyncGrvt(lite_gateway.env, api_key="test-key", order_transport="ws", encoding="lite") as client:
+    async with AsyncGrvt(
+        lite_gateway.env, api_key="test-key", order_transport="ws", **lite_gateway.client_options
+    ) as client:
         ack = await client.cancel_order(sub_account_id=1, client_order_id=2)
         assert ack == m.AckResponse(result=m.Ack(ack=True))
         sent = next(r for r in lite_gateway.received if r["method"] == "v1/cancel_order")
         assert sent["params"]["sub_account_id"] == "1" and sent["params"]["client_order_id"] == "2"
 
 
-async def test_lite_book_stream_matches_full(gateway, lite_gateway):
+async def test_lite_book_stream_matches_full(full_gateway, lite_gateway):
     snapshot = {"event_time": "1", "instrument": "BTC_USDT_Perp", "bids": [instrument_level()], "asks": []}
     got = []
-    for gw in (gateway, lite_gateway):
+    for gw in (full_gateway, lite_gateway):
         gw.snapshot_feeds["v1.book.s"] = snapshot
         async with AsyncGrvt(gw.env, **gw.client_options) as client:
             async with client.orderbook_snap_stream(instrument="BTC_USDT_Perp", rate=500, depth=10) as sub:

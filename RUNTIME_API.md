@@ -4,7 +4,7 @@ Generated code in `src/grvt/_generated/` talks to the hand-written runtime only 
 this page, all importable from `grvt._runtime`. If the generator needs something not listed here, add
 it to the runtime and to this page; never reach into private attributes.
 
-The generator is `sdk/generator/python` (`go run ./sdk/generator python`, or `make sdk-gen` for everything). Its
+The generator is `sdk/generator/python` (`make sdk-gen-python`, or `make sdk-gen-code` for every SDK and the docs). Its
 output in `src/grvt/_generated/` (not committed) is the reference for everything below.
 
 ## 1. Models (one per contract type)
@@ -71,8 +71,11 @@ Top-level 64-bit int arguments are typed `int | str` and passed through `w.as_st
 For REST the whole body is the response struct; over WS the JSON-RPC `result` is that same struct.
 Errors come back as exceptions: `ApiError` (or a generated subclass), `RateLimitError`,
 `TransportError`, `OrderStateUnknown`, `DecodeError` (a body that does not match `response_type`; on a write it
-is the cause of `OrderStateUnknown`). `client_order_id` may be a list (bulk orders: one id per order);
-`OrderStateUnknown.client_order_ids` then carries all of them.
+is the cause of `OrderStateUnknown`), `SigningError`, `ConfigError`, `FrameTooLarge`, `ClosedError`.
+`client_order_id` is what an unknown outcome reports, so pass it for every order write; it may be a list (bulk
+orders: one id per order), and `OrderStateUnknown.client_order_ids` then carries all of them. `before_send` may
+change the request but must not add, remove or reorder orders, or change their client order IDs (prices, sizes and other fields may change): if it does, the call raises `ConfigError` and
+sends nothing.
 
 With `encoding="lite"` (the default) the runtime sends gateway calls to `lite_path` and renames at the wire only (section 7);
 the request, the hooks, signing and the decoded model keep full names.
@@ -124,7 +127,7 @@ error. A generic encoder exists only as the test reference (`tests/eip712_refere
 `StructType` is internal (not exported from `grvt`) and always takes the generated `hasher`: the SDK signs only
 Grvt's own messages. `Runtime.sign` signs with a `PrivateKeySigner` directly from the generated digest. Any other
 `Signer` gets the typed data through `sign_typed`, and its signature is checked against the generated digest
-before anything is sent (the rules and the KMS high-s note are in [Use a wallet or KMS signer](https://developers.grvt.io/sdks/python#use-a-wallet-or-kms-signer)).
+before anything is sent (the rules and the KMS high-s note are in [Sign with a wallet or KMS](https://developers.grvt.io/sdks/python#sign-with-a-wallet-or-kms)).
 
 The sign function works on the request as JSON data (`d = codec.to_builtins(req)`), so contract
 paths apply directly:
@@ -161,7 +164,8 @@ Contract transform -> generated expression (helpers in `grvt._runtime.signing.wi
 
 `ORDER_CHECKS` is the contract's `order_checks` as a dict (`legs`, `instrument`, `scales` as an int or
 `"base_decimals"`, `rules`). `w.check_order` raises `OrderOutOfBounds` (a `ValueError`) for the first leg
-outside its instrument's limits and `ValueError` for a malformed value; it never changes the order.
+outside its instrument's limits and `SigningError` (also a `ValueError`) for a malformed value; it never changes
+the order.
 
 Variant rule kinds the generator knows: `builder`, `wallet_types`, `currency_width`, and a single type.
 An unknown kind fails generation.
@@ -198,7 +202,7 @@ class Grvt(api.SyncApi):  # blocking; SyncApi: the same methods
 
 `Runtime(...)` keyword args the shell may pass through: `api_key`, `signer`, `order_transport`
 (`"rest"|"ws"`), `encoding` (`"lite"` default `|"full"`), `check_orders`, `clock`, `nonces`, `client_order_ids`, `transport` (HTTP plug-in), `before_send`,
-`on_event`, `http_attempt_timeout`, `call_timeout`, `ws_request_timeout`, `resync_timeout`, `queue_size`. These keywords
+`on_event`, `http_attempt_timeout`, `call_timeout`, `ws_request_timeout`, `resync_timeout`, `idle_timeout`, `queue_size`. These keywords
 are described by
 `ClientOptions`; generated constructors use `Unpack[ClientOptions]` so type checkers validate them.
 
@@ -209,18 +213,20 @@ subscription acknowledgement. Defaults come from `grvt/_generated/behavior.py` (
 
 A timeout before dispatch raises `TimeoutError` and sends no write.
 Cancellation uses normal `asyncio` cancellation before dispatch.
-After a write starts, the SDK deadline raises `OrderStateUnknown` with the final submitted IDs. External cancellation keeps the native `asyncio.CancelledError`, so task groups and `task.cancelled()` work normally. Its `__cause__` holds an `OrderStateUnknown` with the RPC name and final submitted IDs; catch cancellation to save these IDs for reconciliation, then re-raise it. The cause is absent if nothing was dispatched. Reconciliation belongs to the caller that catches cancellation, outside the canceled task or task group. Request bodies and credentials are never attached.
+After a write starts, the SDK deadline raises `OrderStateUnknown` with the client order IDs. External cancellation keeps the native `asyncio.CancelledError`, so task groups and `task.cancelled()` work normally. Its `__cause__` holds an `OrderStateUnknown` with the RPC name and client order IDs; catch cancellation to save these IDs for reconciliation, then re-raise it. The cause is absent if nothing was dispatched. Reconciliation belongs to the caller that catches cancellation, outside the canceled task or task group. Request bodies and credentials are never attached.
 Shared metadata and login tasks can finish after a caller stops waiting.
 Closing the client cancels those owned tasks.
 Synchronous hooks and noncooperative plug-ins cannot be interrupted, but the runtime checks the absolute deadline again before dispatch.
 
+`on_event` receives an `Event`: one dataclass with `kind` (`EventKind`), `ts`, and an attribute for every
+field of the `events` table in `contract/behavior.json` (`code`, `reason`, `attempt`, `delay` in seconds,
+`error`, `fatal`, `direction`, ...). Only the attributes of its kind are set; the rest are `None`. The `detail`
+property returns the kind's attributes as a dict, as events had before; it is kept for older code.
+
 ## HTTP redirects and retries
 
-The SDK does not follow HTTP redirects for API requests or WebSocket handshakes.
-A redirected WebSocket handshake fails before a second request, so session cookies and account headers stay at the configured endpoint.
-A redirect on a write returns an uncertain outcome instead of sending the signed request to another endpoint.
-The default transports also avoid retries after an uncertain write failure.
-Custom HTTP transports must preserve these rules.
+The SDK never follows a redirect or retries a write, and a custom HTTP transport must not either: the rule and
+why are in [What the SDK retries](https://developers.grvt.io/guides/errors-and-retries#what-the-sdk-retries).
 
 ## 7. Lite encoding
 
@@ -238,7 +244,7 @@ types, the stream frame keys (`FEED_FRAME`) and the HTTP error body keys (`HTTP_
 - **Requests:** `lite.encode(rpc.request_type, params)` builds new twins with `to_lite_<Type>` (the caller's objects
   are never changed) and encodes them. A twin has exactly the type's fields, so no other key can reach the wire.
   A dict request (for example from `before_send`) is converted to the model first, and a key the model would
-  drop raises `ValueError` before anything is sent: the lite server would ignore it and read the field as empty.
+  drop raises `ConfigError` (a `ValueError`) before anything is sent: the lite server would ignore it and read the field as empty.
 - **WebSocket envelope:** the read loop decodes frames with `lite.Frame` (the same fields as `codec.Frame`, lite
   keys) in one msgspec pass; `lite.jsonrpc_frame` builds requests. Error objects, subscribe params and subscribe
   results use the names of their contract types. Error replies may carry id 0 and an empty method.

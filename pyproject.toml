@@ -28,7 +28,7 @@ dev = [
 requires = ["hatchling==1.33.0"]
 build-backend = "hatchling.build"
 
-# The generated code and CHANGELOG.md are git-ignored build output (`make sdk-gen`); `artifacts` keeps them in
+# The generated code and CHANGELOG.md are git-ignored build output (`make sdk-gen-python`); `artifacts` keeps them in
 # both packages anyway.
 [tool.hatch.build]
 artifacts = ["src/grvt/_generated/*.py", "CHANGELOG.md"]
@@ -40,6 +40,10 @@ packages = ["src/grvt"]
 [tool.hatch.build.targets.sdist]
 include = ["src/grvt", "README.md", "CHANGELOG.md", "RUNTIME_API.md", "LICENSE"]
 
+# The one uv version for local runs and CI (the workflows install this one).
+[tool.uv]
+required-version = "==0.13.6"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
@@ -48,9 +52,10 @@ markers = [
     "smoke: talks to Grvt testnet market data (read-only, unauthenticated); runs only with GRVT_SMOKE=1",
 ]
 
+# ruff targets requires-python; pyright needs pythonVersion spelled out, and sdk/scripts/release-readiness.py holds it to
+# the floor in sdk/metadata.json.
 [tool.ruff]
 line-length = 120
-target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B"]
@@ -58,10 +63,15 @@ select = ["E", "F", "W", "I", "UP", "B"]
 ignore = ["E501"]
 
 [tool.pyright]
-include = ["src", "tests"]
+include = ["src", "tests", "examples"]
 pythonVersion = "3.11"
 typeCheckingMode = "standard"
 # The shipped package is held to strict; tests stay at standard.
 strict = ["src"]
 # Tests import their helpers (eip712_reference) the way pytest puts tests/ on sys.path.
 extraPaths = ["tests"]
+# The guides include the examples as they are, so they get the same leniency as code on a portal page
+# (sdk/portal/tests/check_code.py): a reader's snippet need not prove every Optional is set.
+executionEnvironments = [
+  { root = "examples", reportOptionalMemberAccess = "none", reportOptionalSubscript = "none", reportOptionalIterable = "none", reportPossiblyUnboundVariable = "none" },
+]

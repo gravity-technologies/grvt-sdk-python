@@ -6,11 +6,11 @@ import time
 from dataclasses import replace
 
 import pytest
-from conftest import CREATE_ORDER, INSTRUMENT, wait_until
+from conftest import CREATE_ORDER, RAW_CREATE_ORDER, RAW_INSTRUMENT, order, wait_until
 
 from grvt._runtime import OrderStateUnknown, Runtime
 
-WRITE = replace(CREATE_ORDER, auth=False)
+WRITE = replace(RAW_CREATE_ORDER, auth=False)
 
 
 class Transport:
@@ -87,7 +87,7 @@ async def test_cancelled_metadata_waiter_does_not_cancel_the_shared_load():
 async def test_authentication_wait_uses_the_call_budget_without_poisoning_shared_login():
     transport = Transport()
     transport.login_delay = 0.05
-    spec = replace(INSTRUMENT, auth=True)
+    spec = replace(RAW_INSTRUMENT, auth=True)
     async with Runtime(transport=transport, encoding="full", api_key="k") as rt:
         first = asyncio.create_task(rt.call(spec, {}, timeout=0.01))
         second = asyncio.create_task(rt.call(spec, {}, timeout=0.3))
@@ -104,7 +104,7 @@ async def test_retry_backoff_shares_the_total_budget(monkeypatch):
     monkeypatch.setattr("grvt._runtime.rest.Backoff.next_delay", lambda _: 0.1)
     async with Runtime(transport=transport, encoding="full", call_timeout=0.02) as rt:
         with pytest.raises(TimeoutError):
-            await rt.call(INSTRUMENT, {})
+            await rt.call(RAW_INSTRUMENT, {})
     assert len(transport.calls) == 1
 
 
@@ -130,7 +130,9 @@ async def test_dispatched_http_write_keeps_ids_and_native_cancellation_cause(can
     transport = Transport()
     transport.block_write = True
     async with Runtime(transport=transport, encoding="full") as rt:
-        task = asyncio.create_task(rt.call(WRITE, {"order": {"metadata": {"client_order_id": "42"}}}, timeout=0.02))
+        task = asyncio.create_task(
+            rt.call(WRITE, {"order": {"metadata": {"client_order_id": "42"}}}, client_order_id="42", timeout=0.02)
+        )
         await transport.sent.wait()
         if cancel:
             task.cancel()
@@ -151,12 +153,10 @@ async def test_dispatched_http_write_keeps_ids_and_native_cancellation_cause(can
 
 async def test_dispatched_ws_write_deadline_removes_pending_entry(gateway, timeout_chaining):
     gateway.ignore_rpcs.add(CREATE_ORDER.method)
-    async with Runtime(gateway.env, encoding="full", api_key="test-key", order_transport="ws") as rt:
+    async with Runtime(gateway.env, **gateway.client_options, api_key="test-key", order_transport="ws") as rt:
         await rt.session.ensure()
         await rt.socket("td").connected()
-        task = asyncio.create_task(
-            rt.call(CREATE_ORDER, {"order": {"metadata": {"client_order_id": "42"}}}, timeout=0.05)
-        )
+        task = asyncio.create_task(rt.call(CREATE_ORDER, order("42"), client_order_id="42", timeout=0.05))
         await wait_until(lambda: any(r["method"] == CREATE_ORDER.method for r in gateway.received))
         with pytest.raises(OrderStateUnknown) as ei:
             await task
@@ -210,7 +210,9 @@ async def test_taskgroup_cancellation_keeps_write_uncertainty():
     transport.block_write = True
     async with Runtime(transport=transport, encoding="full") as rt:
         async with asyncio.TaskGroup() as group:
-            task = group.create_task(rt.call(WRITE, {"order": {"metadata": {"client_order_id": "42"}}}))
+            task = group.create_task(
+                rt.call(WRITE, {"order": {"metadata": {"client_order_id": "42"}}}, client_order_id="42")
+            )
             await transport.sent.wait()
             task.cancel()
         assert task.cancelled()
@@ -223,8 +225,8 @@ async def test_taskgroup_cancellation_keeps_write_uncertainty():
 
 async def test_ws_external_cancellation_stays_native(gateway):
     gateway.ignore_rpcs.add(CREATE_ORDER.method)
-    async with Runtime(gateway.env, encoding="full", api_key="test-key", order_transport="ws") as rt:
-        task = asyncio.create_task(rt.call(CREATE_ORDER, {"order": {"metadata": {"client_order_id": "42"}}}))
+    async with Runtime(gateway.env, **gateway.client_options, api_key="test-key", order_transport="ws") as rt:
+        task = asyncio.create_task(rt.call(CREATE_ORDER, order("42"), client_order_id="42"))
         await wait_until(lambda: any(r["method"] == CREATE_ORDER.method for r in gateway.received))
         task.cancel()
         with pytest.raises(asyncio.CancelledError) as ei:

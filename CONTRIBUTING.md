@@ -100,18 +100,17 @@ Run `uv run --locked python benchmarks/hot_path.py`. Numbers below are from one 
 
 ## Known shortcuts and TODOs
 
+What users can't do yet (re-login after a WebSocket auth failure, request ordering on one WebSocket,
+private-stream resume, ...) is listed in [Not supported yet](https://developers.grvt.io/sdks/python#not-supported-yet); keep it there. Below are the
+maintainers' notes.
+
 - **Session rotation on WebSocket is break-before-make.** After a re-login each socket waits until no write is
   in flight, then reconnects with the new cookie. The design calls for make-before-break: open the new socket,
   subscribe, move order entry, then drain the old one.
-- **No re-login on a WebSocket `1000` (unauthorized) reply.** A subscribe that fails auth raises to the consumer.
-  A handshake 401/403 or a failed API-key login stops reconnecting for good.
 - **The frame-size check is off by default.** The gateway library's default read limit is 1024 bytes, but the
   deployed value isn't published, so `Environment.ws_max_frame_bytes` is `None` for testnet and production.
   When set, an oversized frame raises `FrameTooLarge` and nothing is sent. Automatic fallback to REST is a TODO.
 - **Book deltas are never conflated.** The `OrderBook` helper merges levels; queue overflow breaks continuity.
-- **Request ordering on one WebSocket isn't guaranteed by the server**, so a cancel can overtake its create.
-  The SDK doesn't work around this.
-- **Private-stream resume** (`from_sequence_number`) waits on server support.
 - **WebSocket transport:** a picows/uvloop transport is a possible later option.
 - **No WireRecorder, ReplayTransport or OpenTelemetry yet.** `on_event` `FRAME` events carry raw bytes (not
   redacted) for anyone who wants to build them.

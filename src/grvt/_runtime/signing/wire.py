@@ -1,7 +1,7 @@
 """Helpers the generated sign functions call. They work on the request as plain JSON data (dicts).
 
 Each helper is one contract transform (see sdk/contract/contract.json `signed.transforms`).
-Errors are ValueError and always happen before anything is signed.
+Errors are SigningError (a ValueError) and always happen before anything is signed.
 """
 
 from __future__ import annotations
@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any, overload
 
+from ..errors import ConfigError, SigningError
 from .checks import OrderChecks, OrderRule, check_order, leg_instruments
 from .eip712 import StructType, grvt_domain
 from .transforms import json_list, to_address, to_int
@@ -38,7 +39,7 @@ def items(obj: Any, *path: str) -> list[Any]:
 def copy(value: Any, eip_type: str, where: str, default: Any = _MISSING) -> Any:
     if value is None or value == "":
         if default is _MISSING:
-            raise ValueError(f"{where} is required for signing")
+            raise SigningError(f"{where} is required for signing")
         value = default
     if eip_type == "bool":
         return value if isinstance(value, bool) else str(value).lower() == "true"
@@ -55,7 +56,7 @@ def enum_code(value: Any, codes: dict[str, int], where: str) -> int:
     try:
         return codes[str(value)]
     except KeyError:
-        raise ValueError(f"{where}: unknown enum value {value!r}") from None
+        raise SigningError(f"{where}: unknown enum value {value!r}") from None
 
 
 def address(value: Any) -> str:
@@ -69,12 +70,12 @@ def address_set(value: Any) -> bool:
 def scaled(value: Any, decimals: int, where: str, default: Any = _MISSING) -> int:
     if value is None or value == "":
         if default is _MISSING:
-            raise ValueError(f"{where} is required for signing")
+            raise SigningError(f"{where} is required for signing")
         value = default
     try:
         return _scaled(value, decimals)
     except ValueError as e:
-        raise ValueError(f"{where}: {e}") from None
+        raise SigningError(f"{where}: {e}") from None
 
 
 class Meta:
@@ -86,20 +87,20 @@ class Meta:
     def instrument(self, name: Any) -> dict[str, Any]:
         v = self._cache.peek("instrument", str(name))
         if v is None:
-            raise ValueError(f"no metadata for instrument {name!r}")
+            raise SigningError(f"no metadata for instrument {name!r}")
         return v
 
     def currency(self, symbol: Any) -> dict[str, Any]:
         v = self._cache.peek("currency", str(symbol))
         if v is None:
-            raise ValueError(f"no metadata for currency {symbol!r}")
+            raise SigningError(f"no metadata for currency {symbol!r}")
         return v
 
     def main_account(self) -> str:
         """The session's main account address (contract signed.main_account)."""
         v = self._cache.peek("main_account", "")
         if v is None:
-            raise ValueError("no metadata for the session's main account")
+            raise SigningError("no metadata for the session's main account")
         return to_address(v)
 
 
@@ -115,7 +116,7 @@ def prepare_signature(rt: Runtime, request: dict[str, Any], path: tuple[str, ...
     sig: dict[str, Any] = parent.get(path[-1]) or {}
     parent[path[-1]] = sig
     if rt.signer is None:
-        raise ValueError("this call needs a signer: pass signer=PrivateKeySigner(...)")
+        raise ConfigError("this call needs a signer: pass signer=PrivateKeySigner(...)")
     sig.setdefault("signer", rt.signer.address)
     if sig.get("nonce") is None:
         sig["nonce"] = rt.nonces.next()

@@ -1,8 +1,10 @@
 """In-process fake gateway (aiohttp) that speaks the Grvt WS + REST protocol closely enough for tests.
 
-The `lite_gateway` fixture is the same fake speaking the lite encoding: it renames at its edge with its own
-tables, built from contract.json (not from the SDK's generated ones), records every request with full names
-so tests read them the same way, and fails the test if the client sent a key that is not a lite name.
+The `gateway` fixture runs each test twice, once per wire encoding (full and lite), because users get lite by
+default. In lite the fake renames at its edge with its own tables, built from contract.json (not from the SDK's
+generated ones), records every request with full names so tests read them the same way in both encodings, and
+fails the test if the client sent a key that is not a lite name. `full_gateway` and `lite_gateway` serve one
+encoding each, for tests about one encoding or comparing the two.
 """
 
 from __future__ import annotations
@@ -12,13 +14,13 @@ import json
 from collections.abc import Callable
 from typing import Any
 
-import msgspec
 import pytest
 from aiohttp import WSMsgType, web
 from aiohttp.test_utils import TestServer
 from shared_data import load_shared
 
-from grvt._runtime import Environment, RpcSpec, StreamSpec, SyncRunner
+from grvt._generated import specs
+from grvt._runtime import Environment, RpcSpec, SyncRunner
 
 CONTRACT = load_shared("contract/contract.json")
 
@@ -40,18 +42,38 @@ def instrument_payload(name="BTC_USDT_Perp"):
     }
 
 
-class TickerFeed(msgspec.Struct):
-    stream: str
-    selector: str
-    sequence_number: str
-    feed: dict
-    prev_sequence_number: str = "0"
+# The specs the gateway tests call. They are the generated ones because a lite client needs each call's request and
+# response types to rename the wire keys; a hand-made spec with `dict` types would only work in full.
+TICKER = specs.STREAM_TICKER_TICKER_SNAP  # conflated: a slow consumer drops old frames
+ORDERS = specs.STREAM_ORDER_ORDER  # private stream: never conflated
+CREATE_ORDER = specs.ORDER_CREATE_ORDER
+BULK_ORDERS = specs.ORDER_BULK_ORDERS
+INSTRUMENT = specs.INSTRUMENT_GET_INSTRUMENT
+
+# Untyped twins of the two calls, for tests that talk to a fake transport (always full) and need replies or
+# params the typed models would reject.
+RAW_CREATE_ORDER = RpcSpec(
+    "v1/create_order", "td", "/full/v1/create_order", dict, auth=True, write=True, order_entry=True
+)
+RAW_INSTRUMENT = RpcSpec("v1/instrument", "md", "/full/v1/instrument", dict)
 
 
-TICKER = StreamSpec("v1.ticker.d", "md", TickerFeed, conflate=True)
-ORDERS = StreamSpec("v1.order", "td", TickerFeed, auth=True)  # private stream: never conflated
-CREATE_ORDER = RpcSpec("v1/create_order", "td", "/full/v1/create_order", dict, auth=True, write=True, order_entry=True)
-INSTRUMENT = RpcSpec("v1/instrument", "md", "/full/v1/instrument", dict)
+SIGNATURE = {"signer": "0x0", "r": "0x0", "s": "0x0", "v": 27, "expiration": "0", "nonce": 0, "chain_id": "326"}
+
+
+def order(client_order_id: str = "77", **fields: Any) -> dict:
+    """create_order params that encode in lite and, echoed back as the result, decode as an Order."""
+    return {
+        "order": {
+            "sub_account_id": "42",
+            "time_in_force": "GOOD_TILL_TIME",
+            "legs": [],
+            "signature": SIGNATURE,
+            "metadata": {"client_order_id": client_order_id},
+            **fields,
+        }
+    }
+
 
 # push's default feed, {"n": seq}. Any other value, None included, is sent as the feed.
 FIXTURE = object()
@@ -148,6 +170,7 @@ class FakeGateway:
         # Options every test client of this gateway takes: each fake serves one encoding only.
         self.client_options: dict[str, Any] = {"encoding": "lite" if lite else "full"}
         self.conns: list[web.WebSocketResponse] = []
+        self.silent: set[int] = set()  # id() of connections that send nothing, not even pongs
         self.received: list[dict] = []
         self.rest_calls: list[tuple[str, dict, dict]] = []
         self.handshakes: list[dict] = []
@@ -170,7 +193,7 @@ class FakeGateway:
     # -- WS ------------------------------------------------------------------------------
     async def ws(self, request: web.Request) -> web.WebSocketResponse:
         self.handshakes.append(dict(request.headers))
-        raw = web.WebSocketResponse()
+        raw = web.WebSocketResponse(autoping=False)  # pongs below, so a silent connection can skip them
         await raw.prepare(request)
         ws: Any = raw if self.lite is None else LiteSocket(raw, self.lite)
         self.conns.append(ws)
@@ -178,6 +201,10 @@ class FakeGateway:
         self.new_conn.set()
         try:
             async for msg in raw:
+                if id(raw) in self.silent:
+                    continue
+                if msg.type is WSMsgType.PING:
+                    await raw.pong(msg.data)
                 if msg.type is not WSMsgType.TEXT:
                     continue
                 data = json.loads(msg.data)
@@ -213,6 +240,7 @@ class FakeGateway:
         finally:
             if ws in self.conns:
                 self.conns.remove(ws)
+            self.silent.discard(id(raw))
         return raw
 
     async def _subscribe(self, ws, data) -> None:
@@ -280,6 +308,13 @@ class FakeGateway:
             for ws in list(self.conns):
                 await ws.close(code=code)
 
+    async def silence(self) -> None:
+        """The current connections stay open but send nothing more: no frames, replies or pongs."""
+        async with self.stream_lock:
+            for ws in self.conns:
+                self.silent.add(id(ws.ws if isinstance(ws, LiteSocket) else ws))
+            self.conns.clear()
+
     def subscribes(self) -> list[dict]:
         return [r for r in self.received if r["method"] == "subscribe"]
 
@@ -317,6 +352,8 @@ class FakeGateway:
             return web.json_response(payload, status=status)
         if route == "instrument":
             return web.json_response({"result": instrument_payload(body["instrument"])})
+        if route == "create_order":  # the order as placed, as the server answers
+            return web.json_response({"result": body["order"]})
         return web.json_response({"result": {"route": route, "echo": body}})
 
     async def login(self, request: web.Request) -> web.Response:
@@ -346,41 +383,49 @@ class FakeGateway:
         return app
 
 
-@pytest.fixture
-async def gateway():
-    gw = FakeGateway()
+def check_lite(gw: FakeGateway) -> None:
+    if gw.lite is not None:
+        assert gw.lite.violations == [], f"the lite client sent non-lite keys: {gw.lite.violations}"
+
+
+async def start_gateway(lite: bool) -> tuple[FakeGateway, TestServer]:
+    """Starts a fake and points its env at it, with the lite WS URLs when it speaks lite."""
+    gw = FakeGateway(lite=lite)
     server = TestServer(gw.app())
     await server.start_server()
     base = str(server.make_url("")).rstrip("/")
-    ws = base.replace("http://", "ws://") + "/ws/full"
-    gw.env = Environment("fake", base, base, base, ws, ws, chain_id=326)  # type: ignore[attr-defined]
+    ws = base.replace("http://", "ws://")
+    lite_urls = {"md_ws_lite_url": ws + "/ws/lite", "td_ws_lite_url": ws + "/ws/lite"} if lite else {}
+    name = "fake-lite" if lite else "fake"
+    gw.env = Environment(name, base, base, base, ws + "/ws/full", ws + "/ws/full", chain_id=326, **lite_urls)  # type: ignore[attr-defined]
+    return gw, server
+
+
+@pytest.fixture(params=["full", "lite"])
+async def gateway(request):
+    """The fake gateway in each encoding: a test that takes it runs twice. Build clients with
+    **gateway.client_options so each run uses the gateway's encoding."""
+    gw, server = await start_gateway(request.param == "lite")
+    yield gw
+    await server.close()
+    check_lite(gw)
+
+
+@pytest.fixture
+async def full_gateway():
+    """The fake gateway in the full encoding only, for tests that compare the two encodings."""
+    gw, server = await start_gateway(False)
     yield gw
     await server.close()
 
 
 @pytest.fixture
 async def lite_gateway():
-    """The fake gateway in the lite encoding. Fails the test if the client sent any non-lite key."""
-    gw = FakeGateway(lite=True)
-    server = TestServer(gw.app())
-    await server.start_server()
-    base = str(server.make_url("")).rstrip("/")
-    ws = base.replace("http://", "ws://")
-    gw.env = Environment(  # type: ignore[attr-defined]
-        "fake-lite",
-        base,
-        base,
-        base,
-        ws + "/ws/full",
-        ws + "/ws/full",
-        chain_id=326,
-        md_ws_lite_url=ws + "/ws/lite",
-        td_ws_lite_url=ws + "/ws/lite",
-    )
+    """The fake gateway in the lite encoding only. Fails the test if the client sent any non-lite key."""
+    gw, server = await start_gateway(True)
     yield gw
     await server.close()
-    assert gw.lite is not None
-    assert gw.lite.violations == [], f"the lite client sent non-lite keys: {gw.lite.violations}"
+    check_lite(gw)
 
 
 async def wait_until(pred: Callable[[], bool], timeout: float = 3.0) -> None:
@@ -391,28 +436,12 @@ async def wait_until(pred: Callable[[], bool], timeout: float = 3.0) -> None:
         await asyncio.sleep(0.01)
 
 
-@pytest.fixture
-def gateway_sync():
-    """The fake gateway on its own loop thread, for the blocking client test."""
-
+@pytest.fixture(params=["full", "lite"])
+def gateway_sync(request):
+    """The fake gateway on its own loop thread, in each encoding, for the blocking client tests."""
     runner = SyncRunner()
-    gw = FakeGateway.__new__(FakeGateway)
-
-    async def start():
-        FakeGateway.__init__(gw)
-        server = TestServer(gw.app())
-        await server.start_server()
-        return server
-
-    server = runner.run(start())
-    base = str(server.make_url("")).rstrip("/")
-    ws = base.replace("http://", "ws://") + "/ws/full"
-    yield Environment("fake", base, base, base, ws, ws, chain_id=326)
+    gw, server = runner.run(start_gateway(request.param == "lite"))
+    yield gw
     runner.run(server.close())
     runner.close()
-
-
-@pytest.fixture(params=["full", "lite"])
-def any_gateway(request):
-    """The fake gateway in each encoding; pass gateway.client_options to the client."""
-    return request.getfixturevalue("gateway" if request.param == "full" else "lite_gateway")
+    check_lite(gw)

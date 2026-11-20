@@ -40,7 +40,8 @@ async def test_testnet_market_data():
         if event.kind is not EventKind.FRAME:
             events.append(event)
 
-    async with AsyncGrvt("testnet", on_event=on_event) as client:
+    # Full, because the raw WS request below sends full field names; lite is the default (and the next test).
+    async with AsyncGrvt("testnet", encoding="full", on_event=on_event) as client:
         inst = await client.get_instrument(instrument="BTC_USDT_Perp")
         assert isinstance(inst, m.ApiGetInstrumentResponse)
         assert inst.result is not None
@@ -79,7 +80,7 @@ async def test_testnet_market_data_lite_matches_full():
     for encoding in ("full", "lite"):
 
         def on_event(event, frames=sizes[encoding]):
-            if event.kind is EventKind.FRAME and event.detail["dir"] == "in" and b'"v1.book.s"' in event.raw:
+            if event.kind is EventKind.FRAME and event.direction == "in" and b'"v1.book.s"' in event.raw:
                 frames.append(len(event.raw))
 
         async with AsyncGrvt("testnet", encoding=encoding, on_event=on_event) as client:

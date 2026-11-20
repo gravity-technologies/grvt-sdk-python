@@ -8,6 +8,15 @@ OrderStateUnknown  a write may or may not have reached the exchange. Never resen
                    look the order up by client_order_id first.
 OrderOutOfBounds   an order leg is off its instrument's tick or size step, or under its minimum size or
                    notional. Raised before signing; nothing was sent.
+StreamOverflow  a consumer fell behind a stream that may not drop items.
+FrameTooLarge   a WS request is larger than the environment's frame limit; nothing was sent.
+SigningError    a request could not be signed; nothing was sent.
+ConfigError     a bad option, or the client lacks something the call needs (signer, api key).
+ClosedError     the client was closed.
+
+The kinds, their parents and fields are listed in sdk/contract/behavior.json ("errors"); test_behavior.py
+checks this module against it. SigningError, ConfigError and OrderOutOfBounds are also ValueError, which
+those problems raised before they had their own classes.
 """
 
 from __future__ import annotations
@@ -56,8 +65,31 @@ class TransportError(GrvtError):
         super().__init__(f"{rpc + ': ' if rpc else ''}{message}")
 
 
-class FrameTooLarge(TransportError):
-    """The encoded WS frame is larger than the server accepts. Nothing was sent."""
+class FrameTooLarge(GrvtError):
+    """The encoded WS frame is larger than the server accepts. Nothing was sent.
+
+    Not a TransportError: the request never left, and sending it again fails the same way.
+    """
+
+    def __init__(self, size: int, limit: int):
+        self.size = size
+        self.limit = limit
+        super().__init__(f"frame is {size} bytes, server limit {limit}; use order_transport='rest' for this call")
+
+
+class SigningError(GrvtError, ValueError):
+    """A request could not be signed (missing field, over-precise decimal, unknown metadata). Nothing was sent."""
+
+
+class ConfigError(GrvtError, ValueError):
+    """A bad option, or the client lacks something the call needs (signer, api key)."""
+
+
+class ClosedError(GrvtError):
+    """The client was closed."""
+
+    def __init__(self) -> None:
+        super().__init__("client closed")
 
 
 class DecodeError(GrvtError):
