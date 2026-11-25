@@ -148,7 +148,9 @@ class Runtime:
         self.check_orders = check_orders  # False skips the instrument-limit check before signing
         self.clock = clock or SystemClock()
         self.nonces = nonces or RandomNonce()
-        self.client_order_ids = client_order_ids or TimeCounterClientOrderId(self.clock)
+        self.client_order_ids = (
+            client_order_ids if client_order_ids is not None else TimeCounterClientOrderId(self.clock)
+        )
         self.http = transport or AiohttpTransport()
         self.hooks = Hooks(before_send, on_event)
         for name, value in (

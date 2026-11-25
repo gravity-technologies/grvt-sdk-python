@@ -16,7 +16,7 @@ from . import api
 class AsyncGrvt(api.AsyncApi):
     """Grvt client (asyncio).
 
-    env: "testnet", "prod" or an Environment. api_key: logs in on first authenticated call.
+    env: "testnet", "production" or an Environment. api_key: logs in on first authenticated call.
     signer: signs orders, transfers and withdrawals. order_transport: "rest" (default) or "ws".
     Other keyword options go to the runtime (encoding, check_orders, clock, nonces, client_order_ids,
     transport, before_send, on_event, http_attempt_timeout, call_timeout, ws_request_timeout,

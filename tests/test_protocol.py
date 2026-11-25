@@ -2,6 +2,7 @@ import json
 import random
 
 from grvt._runtime import FixedClock, TimeCounterClientOrderId
+from grvt._runtime import clock as clock_module
 from grvt._runtime.protocol import (
     UINT32_MAX,
     Backoff,
@@ -53,6 +54,7 @@ def test_jsonrpc_frame_is_valid_json():
 
 def test_sdk_client_order_id_counter_starts_anywhere_in_31_bits_and_wraps(monkeypatch):
     monkeypatch.setattr("secrets.randbits", lambda k: (1 << k) - 1)
+    monkeypatch.setattr(clock_module, "_process_counter", clock_module._new_counter())
     ids = TimeCounterClientOrderId(FixedClock(1_800_000_000 * 10**9))
     a, b = ids.next(), ids.next()
     assert 2**63 <= a < 2**64 and 2**63 <= b < 2**64

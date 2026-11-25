@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import os
 import secrets
 import time
 from typing import Protocol
@@ -61,20 +62,32 @@ class ClientOrderIdProvider(Protocol):
     def next(self) -> int: ...
 
 
-class TimeCounterClientOrderId:
-    """1 << 63 | seconds << 31 | counter: unique per process, sortable, and in the API client range [2^63, 2^64).
+def _new_counter() -> itertools.count[int]:
+    return itertools.count(secrets.randbits(behavior.CLIENT_ORDER_ID_COUNTER_BITS))
 
-    The counter starts at a random 31-bit value, so separate processes rarely collide.
-    """
+
+_process_counter = _new_counter()
+
+
+def _reseed_after_fork() -> None:
+    global _process_counter
+    _process_counter = _new_counter()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reseed_after_fork)
+
+
+class TimeCounterClientOrderId:
+    """An ID from this clock's Unix second and the process-wide 31-bit counter."""
 
     def __init__(self, clock: Clock | None = None) -> None:
         self._clock = clock or SystemClock()
-        self._counter = itertools.count(secrets.randbits(31))
 
     def next(self) -> int:
         seconds = self._clock.now_ns() // 1_000_000_000
         return (
             (1 << 63)
             | ((seconds & behavior.CLIENT_ORDER_ID_SECONDS_MASK) << behavior.CLIENT_ORDER_ID_COUNTER_BITS)
-            | (next(self._counter) & behavior.CLIENT_ORDER_ID_COUNTER_MASK)
+            | (next(_process_counter) & behavior.CLIENT_ORDER_ID_COUNTER_MASK)
         )

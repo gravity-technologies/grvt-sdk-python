@@ -148,16 +148,16 @@ async def run_call(gateway, sc: dict) -> None:
     async with AsyncGrvt(gateway.env, api_key=api_key, signer=PrivateKeySigner(KEY), **options) as client:
         if ws and (reply.get("refuse") or reply.get("send_fails")):
             socket = await client.rt.socket("td").connected()
-            send_str = socket.send_str
+            send_frame = socket.send_frame
 
             # aiohttp's own errors: a closing transport refuses before writing; a lost connection after.
-            async def broken_send(data: str, compress: int | None = None) -> None:
+            async def broken_send(data: bytes, opcode: aiohttp.WSMsgType, compress: int | None = None) -> None:
                 if reply.get("send_fails"):
-                    await send_str(data, compress)
+                    await send_frame(data, opcode, compress)
                     raise aiohttp.ClientConnectionResetError("Connection lost")
                 raise aiohttp.ClientConnectionResetError("Cannot write to closing transport")
 
-            socket.send_str = broken_send  # type: ignore[method-assign]
+            socket.send_frame = broken_send  # type: ignore[method-assign]
 
         if call["kind"] == "read":
             task = asyncio.create_task(client.ticker(instrument="BTC_USDT_Perp"))

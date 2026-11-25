@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+_UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
 
 class Timestamp:
     """Signed Unix nanoseconds, with no floating-point conversion."""
@@ -37,12 +39,12 @@ class Timestamp:
 
     def to_datetime(self) -> datetime:
         """Return UTC, rounding down to the preceding microsecond."""
-        return datetime(1970, 1, 1, tzinfo=UTC) + timedelta(microseconds=self.nanoseconds // 1000)
+        return _UNIX_EPOCH + timedelta(microseconds=self.nanoseconds // 1000)
 
     @classmethod
     def from_datetime(cls, value: datetime) -> Timestamp:
         """Convert an aware datetime exactly; reject ambiguous local times."""
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("datetime must have a timezone")
-        delta = value - datetime(1970, 1, 1, tzinfo=UTC)
+        delta = value - _UNIX_EPOCH
         return cls(((delta.days * 86400 + delta.seconds) * 1_000_000 + delta.microseconds) * 1000)

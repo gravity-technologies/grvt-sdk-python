@@ -3,7 +3,7 @@
 from . import codec, protocol
 from .auth import Session
 from .clock import FixedClock, RandomNonce, SystemClock, TimeCounterClientOrderId
-from .env import PROD, TESTNET, Environment, resolve_env
+from .env import PRODUCTION, TESTNET, Environment, resolve_env
 from .errors import (
     ApiError,
     ClosedError,
@@ -35,7 +35,7 @@ __all__ = [
     "RandomNonce",
     "SystemClock",
     "TimeCounterClientOrderId",
-    "PROD",
+    "PRODUCTION",
     "TESTNET",
     "Environment",
     "resolve_env",

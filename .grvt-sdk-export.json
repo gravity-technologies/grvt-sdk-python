@@ -26,6 +26,7 @@
   "src/grvt/_generated/behavior.py",
   "src/grvt/_generated/client.py",
   "src/grvt/_generated/enums.py",
+  "src/grvt/_generated/environments.py",
   "src/grvt/_generated/errors.py",
   "src/grvt/_generated/lite.py",
   "src/grvt/_generated/models.py",

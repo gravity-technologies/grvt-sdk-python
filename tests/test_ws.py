@@ -65,16 +65,30 @@ async def test_ws_write_timeout_keeps_its_cause_and_logs_in_on_the_handshake(gat
         assert gateway.rest_calls == []  # never fell back to REST
 
 
+async def test_text_frames_preserve_unicode_and_reject_invalid_utf8(gateway):
+    rt, _ = rt_for(gateway)
+    async with rt:
+        selector = "ETH_日本語_🌐@500"
+        sub = rt.stream(TICKER, selector)
+        await sub.start()
+        assert gateway.subscribes()[0]["params"]["selectors"] == [selector]
+
+        socket = rt.socket("md")
+        with pytest.raises(UnicodeDecodeError):
+            await socket.request("v1/instrument", b'{"i":"\xff"}', write=False)
+        assert all(frame["method"] != "v1/instrument" for frame in gateway.received)
+
+
 async def _failing_send(rt, error: Exception, *, written: bool):
     ws = await rt.socket("td").connected()
-    send_str = ws.send_str
+    send_frame = ws.send_frame
 
-    async def broken_send(data: str, compress: int | None = None) -> None:
+    async def broken_send(data: bytes, opcode: aiohttp.WSMsgType, compress: int | None = None) -> None:
         if written:
-            await send_str(data, compress)
+            await send_frame(data, opcode, compress)
         raise error
 
-    ws.send_str = broken_send
+    ws.send_frame = broken_send
 
 
 @pytest.mark.parametrize("write", [True, False])

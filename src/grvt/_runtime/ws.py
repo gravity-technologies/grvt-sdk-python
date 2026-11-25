@@ -638,7 +638,10 @@ class WsSocket:
         if on_dispatch is not None:
             on_dispatch()
         try:
-            await ws.send_str(frame.decode())
+            # Raw request parameters can include arbitrary bytes; a text frame must be valid UTF-8.
+            if not frame.isascii():
+                frame.decode("utf-8")
+            await ws.send_frame(frame, aiohttp.WSMsgType.TEXT)
         except (ConnectionError, RuntimeError, aiohttp.ClientError) as e:
             # aiohttp refuses a closing transport before writing any byte. Any other failure (a drain
             # error, an unknown message) may come after bytes left, so a write's outcome is unknown.

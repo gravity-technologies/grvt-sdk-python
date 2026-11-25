@@ -7,7 +7,7 @@ plug in: environments, signers, hooks and errors. Wire types are in grvt.models,
 from ._generated import AsyncGrvt, Grvt, enums, models
 from ._generated import errors as api_errors
 from ._runtime.clock import Clock, SystemClock
-from ._runtime.env import PROD, TESTNET, Environment
+from ._runtime.env import PRODUCTION, TESTNET, Environment
 from ._runtime.errors import (
     ApiError,
     ClosedError,
@@ -58,7 +58,7 @@ __all__ = [
     "api_errors",
     "Clock",
     "SystemClock",
-    "PROD",
+    "PRODUCTION",
     "TESTNET",
     "Environment",
     "ApiError",

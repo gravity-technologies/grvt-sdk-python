@@ -6,6 +6,8 @@ A failure here means the runtime holds its own copy of a shared constant: use th
 import asyncio
 import dataclasses
 import inspect
+import itertools
+import os
 from collections.abc import Callable
 from typing import Any
 
@@ -17,6 +19,7 @@ import grvt
 from grvt import AsyncGrvt, ClientOptions, ConfigError
 from grvt._generated import behavior
 from grvt._runtime import ApiError, Event, EventKind, RateLimitError, Runtime, TransportError, auth, errors
+from grvt._runtime import clock as clock_module
 from grvt._runtime.clock import FixedClock, TimeCounterClientOrderId
 from grvt._runtime.protocol import Backoff
 from grvt._runtime.rest import read_backoff
@@ -55,6 +58,37 @@ def test_backoff_and_session_constants():
     assert (read_backoff().base, read_backoff().cap) == (behavior.READ_BACKOFF_BASE, behavior.READ_BACKOFF_CAP)
     assert auth.REFRESH_AT == behavior.SESSION_RENEW_AT
     assert auth.DEFAULT_TTL == behavior.SESSION_DEFAULT_LIFETIME
+
+
+async def test_clients_share_default_order_id_counter(monkeypatch):
+    monkeypatch.setattr("secrets.randbits", lambda _: 10)
+    first_clock = FixedClock(1_700_000_000 * 10**9)
+    second_clock = FixedClock(1_700_000_001 * 10**9)
+    custom = TimeCounterClientOrderId(first_clock)
+    async with (
+        AsyncGrvt(clock=first_clock) as a,
+        AsyncGrvt(clock=second_clock) as b,
+        AsyncGrvt(client_order_ids=custom) as c,
+    ):
+        first = a.rt.client_order_ids.next()
+        second = b.rt.client_order_ids.next()
+        mask = behavior.CLIENT_ORDER_ID_COUNTER_MASK
+        assert second & mask == (first + 1) & mask
+        assert (first & ~mask) + (1 << behavior.CLIENT_ORDER_ID_COUNTER_BITS) == second & ~mask
+        assert c.rt.client_order_ids is custom
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires fork")
+def test_fork_reseeds_only_the_child_order_id_counter(monkeypatch):
+    monkeypatch.setattr(clock_module, "_process_counter", itertools.count(11))
+    monkeypatch.setattr("secrets.randbits", lambda _: 37)
+    ids = TimeCounterClientOrderId(FixedClock(0))
+    mask = behavior.CLIENT_ORDER_ID_COUNTER_MASK
+    pid = os.fork()
+    if pid == 0:
+        os._exit(0 if ids.next() & mask == 37 else 1)
+    assert os.waitpid(pid, 0)[1] == 0
+    assert ids.next() & mask == 11
 
 
 def test_client_order_id_layout():

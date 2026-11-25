@@ -1,11 +1,13 @@
 """Where the SDK connects and which chain id it signs for.
 
-Pass a named env ("testnet", "prod") or your own Environment (e.g. a local gateway or a test server).
+Pass a named env ("testnet", "production") or your own Environment (e.g. a local gateway or a test server).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+
+from grvt._generated.environments import named_environments
 
 from .errors import ConfigError
 
@@ -49,24 +51,9 @@ class Environment:
         return url[: -len(_FULL_WS_PATH)] + _LITE_WS_PATH
 
 
-def _hosted(name: str, domain: str, chain_id: int) -> Environment:
-    return Environment(
-        name=name,
-        md_url=f"https://market-data.{domain}",
-        td_url=f"https://trades.{domain}",
-        edge_url=f"https://edge.{domain}",
-        md_ws_url=f"wss://market-data.{domain}{_FULL_WS_PATH}",
-        td_ws_url=f"wss://trades.{domain}{_FULL_WS_PATH}",
-        md_ws_lite_url=f"wss://market-data.{domain}{_LITE_WS_PATH}",
-        td_ws_lite_url=f"wss://trades.{domain}{_LITE_WS_PATH}",
-        chain_id=chain_id,
-    )
-
-
-TESTNET = _hosted("testnet", "testnet.grvt.io", 326)
-PROD = _hosted("prod", "grvt.io", 325)
-
-ENVIRONMENTS = {"testnet": TESTNET, "prod": PROD}
+ENVIRONMENTS = named_environments(Environment)
+TESTNET = ENVIRONMENTS["testnet"]
+PRODUCTION = ENVIRONMENTS["production"]
 
 
 def resolve_env(env: str | Environment, encoding: str = "lite") -> Environment:

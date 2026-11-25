@@ -275,7 +275,10 @@ async def test_custom_environment_is_used_as_given():
     ]:
         with pytest.raises(ValueError, match=field):
             AsyncGrvt(dataclasses.replace(CUSTOM, **{field: empty}))
-    assert sorted(ENVIRONMENTS) == ["prod", "testnet"]
+    assert sorted(ENVIRONMENTS) == ["production", "testnet"]
+    assert grvt.PRODUCTION is ENVIRONMENTS["production"]
+    with pytest.raises(grvt.ConfigError, match="unknown env"):
+        AsyncGrvt("prod")
 
 
 def test_required_models_and_sdk_filled_inputs():
