@@ -2164,7 +2164,7 @@ class SfpTradingScheduleGroup(GrvtModel, kw_only=True):
     name: str
     """The group name. For stable perps on their asset class hours, the asset class (for example `COMMODITY_CME`)"""
     asset_class: e.AssetClass
-    """The instruments' asset class. Its holiday calendar sets the group's holidays"""
+    """The instruments' asset class. The group's holidays come from the stable perps' own holiday calendar when one lists..."""
     instruments: list[str] | None
     """The stable perps trading these hours, sorted. Each stable perp with a schedule is in exactly one group"""
     sessions: list[TradingSession] | None
